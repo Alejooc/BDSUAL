@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.0
+          components: rustfmt, clippy
+      - name: Install frontend dependencies
+        run: npm ci
+      - name: Build frontend
+        run: npm run build
+      - name: Test frontend state
+        run: npm run test:unit
+      - name: Install Playwright browser
+        run: npx playwright install chromium
+      - name: Test workspace flow
+        run: npm run test:e2e
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+      - name: Test Rust core
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+      - name: Build Windows installers
+        run: npm run tauri build -- --bundles nsis,msi
+      - name: Verify Windows installer packages
+        shell: pwsh
+        run: ./scripts/verify-windows-installers.ps1
+      - name: Upload Windows installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: dbsual-windows-installers
+          path: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/msi/*.msi
+          if-no-files-found: error
+          retention-days: 14

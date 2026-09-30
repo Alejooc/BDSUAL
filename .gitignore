@@ -1,0 +1,25 @@
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+.env
+.env.*
+!.env.example
+coverage/
+playwright-report/
+test-results/
+*.tsbuildinfo
+*.log
+
+# Material interno de planificación y exploración no publicado en el repositorio.
+/AGENTS.md
+/specs/
+/spikes/
+/design/
+/docs/entrega-0.png

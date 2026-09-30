@@ -1,0 +1,23 @@
+.csv-import-open { gap: 6px; white-space: nowrap; }
+.csv-import-backdrop { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; padding: 24px; background: #08090bbd; }
+.csv-import-dialog { width: min(760px, 96vw); max-height: min(780px, 92vh); overflow: auto; padding: 20px; border: 1px solid #373a42; border-radius: 9px; background: #181a1f; color: #e1e2e6; box-shadow: 0 18px 60px #0009; }
+.csv-import-dialog > header { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 18px; }
+.csv-import-dialog h2 { margin: 0 0 5px; font-size: 16px; }
+.csv-import-dialog header p, .csv-import-file { margin: 0; color: #999da7; font-size: 12px; }
+.csv-import-field, .csv-import-options label { display: flex; flex-direction: column; gap: 6px; color: #c4c6cd; font-size: 12px; }
+.csv-import-field input, .csv-import-options input, .csv-import-options select { min-width: 0; min-height: 32px; padding: 5px 8px; border: 1px solid #393c45; border-radius: 5px; background: #202228; color: #dfe0e5; }
+.csv-import-options { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
+.csv-import-file { margin-top: 12px; }
+.csv-import-results { margin-top: 14px; color: #caccd2; font-size: 12px; }
+.csv-import-results > p { margin: 0 0 10px; color: #a5d8b2; }
+.csv-import-error { display: flex; align-items: flex-start; gap: 7px; margin: 8px 0; color: #ffaaa6; font-size: 12px; }
+.csv-import-error svg, .csv-import-safety svg { flex: none; }
+.csv-import-table-wrap { max-width: 100%; overflow: auto; border: 1px solid #30333b; border-radius: 5px; }
+.csv-import-table-wrap table { width: 100%; border-collapse: collapse; }
+.csv-import-table-wrap th, .csv-import-table-wrap td { max-width: 240px; padding: 7px 9px; border-bottom: 1px solid #30333b; text-align: left; overflow-wrap: anywhere; }
+.csv-import-table-wrap th { position: sticky; top: 0; background: #22252b; color: #c8cbd2; }
+.csv-import-table-wrap em { color: #9fa3ad; }
+.csv-import-safety { display: flex; gap: 9px; margin-top: 16px; padding: 10px; border: 1px solid #5a4a2d; border-radius: 5px; background: #332a1c; color: #e9d4a5; font-size: 12px; line-height: 1.5; }
+.csv-import-dialog footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+.csv-import-dialog .primary-action:disabled { opacity: .48; cursor: not-allowed; }
+@media (max-width: 560px) { .csv-import-options { grid-template-columns: 1fr; } .csv-import-dialog { padding: 14px; } }

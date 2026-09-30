@@ -1,0 +1,46 @@
+[package]
+name = "dbsual"
+version = "0.1.0"
+description = "DBSUAL desktop database workspace"
+authors = ["DBSUAL contributors"]
+edition = "2021"
+
+[lib]
+name = "dbsual_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "=2.7.0", features = [] }
+
+[dependencies]
+tauri = { version = "=2.12.0", features = [] }
+tauri-plugin-dialog = "=2.8.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "=0.8.6", default-features = false, features = ["sqlite", "mysql", "postgres", "derive", "runtime-tokio", "tls-rustls-ring-native-roots"] }
+keyring = { version = "3.6.3", default-features = false, features = ["windows-native"] }
+uuid = { version = "1", features = ["v4"] }
+tokio = { version = "1", features = ["sync", "rt", "net", "io-util", "time", "macros"] }
+russh = { version = "=0.63.3", default-features = false, features = ["ring"] }
+aes-gcm = "=0.11.1"
+argon2 = { version = "=0.6.0", default-features = false, features = ["alloc"] }
+bip39 = { version = "=2.2.2", default-features = false, features = ["std", "spanish", "unicode-normalization", "zeroize"] }
+getrandom = "=0.4.3"
+sha2 = "=0.11.0"
+csv = "=1.4.0"
+futures-util = "0.3"
+zeroize = { version = "=1.9.0", features = ["derive"] }
+
+[patch.crates-io]
+sqlx-mysql = { path = "vendor/sqlx-mysql" }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+
+[profile.dev]
+debug = 0
+incremental = false
+
+[profile.test]
+debug = 0
+incremental = false

@@ -1,0 +1,435 @@
+.table-data-filter-bar {
+  flex: none;
+  min-height: 38px;
+  padding: 5px 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-bottom: 1px solid #25282e;
+  color: #8d9099;
+}
+
+.table-data-filter-bar select,
+.table-data-filter-bar input {
+  height: 25px;
+  padding: 0 7px;
+  border: 1px solid #34373f;
+  border-radius: 4px;
+  background: #1d2025;
+  color: #d6d8de;
+  font-size: 9px;
+}
+
+.table-data-filter-bar input {
+  min-width: 120px;
+  flex: 1;
+}
+
+.table-data-filter-bar button {
+  height: 25px;
+  padding: 0 7px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid #34373f;
+  border-radius: 4px;
+  background: #22252b;
+  color: #c7c9d0;
+  font-size: 9px;
+}
+
+.table-data-sort {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+
+.table-data-sort:hover {
+  color: #f0f0ff;
+}
+
+.table-data-sort small {
+  color: #a3a4ff;
+  font-size: 10px;
+}
+
+/* La barra de filtros conserva controles y etiquetas legibles en anchos reducidos. */
+.table-data-filter-bar {
+  flex-wrap: wrap;
+  row-gap: 8px;
+}
+
+.table-data-filter-bar > svg {
+  flex: 0 0 auto;
+}
+
+.table-data-filter-bar select {
+  flex: 0 1 auto;
+  min-width: 110px;
+  max-width: 220px;
+}
+
+.table-data-filter-bar input {
+  flex: 1 1 180px;
+  min-width: min(180px, 100%);
+}
+
+.table-data-filter-bar button.icon-button.tiny {
+  flex: 0 0 auto;
+  width: auto;
+  min-width: 92px;
+  height: 32px;
+  margin-left: 0;
+  padding: 0 11px;
+  justify-content: center;
+  white-space: nowrap;
+  color: #d5d6ff;
+  border: 1px solid #45475e;
+  border-radius: 5px;
+  background: #252630;
+  font-size: 11px;
+}
+
+.table-data-filter-bar button.icon-button.tiny:hover:not(:disabled) {
+  border-color: #7779d2;
+  background: #30313e;
+}
+
+.table-data-filter-bar button.icon-button.tiny:focus-visible {
+  outline: 2px solid #9293ed;
+  outline-offset: 2px;
+}
+
+@media (max-width: 900px) {
+  .table-data-filter-bar select {
+    max-width: 170px;
+  }
+}
+
+.table-data-refreshing {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 12px;
+  color: #aaaaf2;
+}
+
+.table-data-refreshing svg {
+  flex: none;
+}
+
+.table-data-grid {
+  position: relative;
+}
+
+.table-data-grid .table-data-result-table {
+  width: max-content;
+  min-width: 100%;
+  table-layout: fixed;
+}
+
+.table-data-grid .table-data-result-table th {
+  position: sticky;
+  z-index: 1;
+  overflow: visible;
+  padding-right: 12px;
+  user-select: none;
+}
+
+.table-data-grid .table-data-result-table td {
+  max-width: none;
+  min-width: 0;
+  vertical-align: top;
+}
+
+.table-data-grid .table-data-sort {
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.table-data-grid .table-data-sort span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.table-data-col-resizer {
+  position: absolute;
+  z-index: 2;
+  top: 0;
+  right: -4px;
+  bottom: 0;
+  width: 8px;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.table-data-col-resizer::after {
+  position: absolute;
+  top: 0;
+  right: 3px;
+  bottom: 0;
+  width: 1px;
+  background: transparent;
+  content: '';
+}
+
+.table-data-col-resizer:hover::after,
+.table-data-col-resizer:focus-visible::after,
+.table-data-col-resizer:active::after {
+  width: 2px;
+  background: #9293ed;
+}
+
+.table-data-col-resizer:focus-visible {
+  outline: 0;
+}
+
+.table-data-cell-value {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  font: inherit;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.table-data-cell-value.clamped {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+  cursor: zoom-in;
+}
+
+.table-data-cell-value.expanded {
+  max-height: min(240px, 40vh);
+  overflow: auto;
+  padding: 4px 5px;
+  border: 1px solid #4b4d67;
+  border-radius: 4px;
+  background: #191b22;
+  cursor: zoom-out;
+}
+
+.table-data-cell-value:focus-visible {
+  outline: 2px solid #9293ed;
+  outline-offset: 2px;
+}
+
+.table-data-loading-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: #e4e5ff;
+  background: rgb(17 19 22 / 68%);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: wait;
+}
+
+.table-data-loading-overlay svg {
+  flex: none;
+}
+
+.table-data-cell-edit-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  margin-left: 6px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: #999caf;
+  vertical-align: middle;
+  opacity: 0;
+}
+
+.sql-result-table td:hover .table-data-cell-edit-button,
+.table-data-cell-edit-button:focus-visible {
+  opacity: 1;
+}
+
+.table-data-cell-edit-button:hover {
+  border-color: #45475e;
+  background: #252630;
+  color: #c6c7ff;
+}
+
+.table-data-cell-edit {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 180px;
+}
+
+.table-data-cell-edit > input:not([type="checkbox"]) {
+  width: 100%;
+  min-width: 72px;
+  height: 26px;
+  padding: 0 6px;
+  border: 1px solid #6567b7;
+  border-radius: 4px;
+  outline: none;
+  background: #181a20;
+  color: #ececf2;
+  font: inherit;
+}
+
+.table-data-cell-edit label {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: #a6a8b2;
+  font-size: 10px;
+}
+
+.table-data-cell-edit button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 1px solid #41434d;
+  border-radius: 4px;
+  background: #252630;
+  color: #d5d6ff;
+}
+
+.table-data-review-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgb(0 0 0 / 62%);
+}
+
+.table-data-review {
+  width: min(520px, calc(100vw - 36px));
+  max-height: min(90vh, 680px);
+  overflow: auto;
+  padding: 20px;
+  border: 1px solid #3c3f49;
+  border-radius: 8px;
+  background: #202228;
+  color: #e3e4e9;
+  box-shadow: 0 18px 70px rgb(0 0 0 / 55%);
+}
+
+.table-data-review > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.table-data-review h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.table-data-review header p,
+.table-data-review-copy {
+  color: #a3a6af;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.table-data-review header p { margin: 5px 0 0; }
+.table-data-review-copy { margin: 16px 0; }
+
+.table-data-review dl {
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
+  gap: 8px 12px;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid #343740;
+  border-radius: 6px;
+  background: #1a1c21;
+  font-size: 11px;
+}
+
+.table-data-review dt { color: #969aa4; }
+.table-data-review dd { min-width: 0; margin: 0; overflow-wrap: anywhere; color: #e0e1e8; }
+
+.table-data-review footer {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-top: 16px;
+}
+
+.table-data-review footer button {
+  min-height: 32px;
+  padding: 0 11px;
+  border-radius: 5px;
+  font-size: 10px;
+}
+
+.table-data-confirmed {
+  margin-top: 12px;
+  padding: 9px 10px;
+  border: 1px solid #345644;
+  border-radius: 5px;
+  background: #1b2b22;
+  color: #a8d8b9;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.table-data-applied {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 8px 12px;
+  padding: 9px 10px;
+  border: 1px solid #345644;
+  border-radius: 5px;
+  background: #1b2b22;
+  color: #b7d9c2;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.table-data-applied button {
+  min-height: 28px;
+  padding: 0 9px;
+  border-radius: 4px;
+  font-size: 10px;
+}
+
+.table-data-edit-error { margin: 8px 12px; }
+
+.table-data-review :focus-visible,
+.table-data-cell-edit :focus-visible,
+.table-data-cell-edit-button:focus-visible {
+  outline: 2px solid #a5a6ff;
+  outline-offset: 2px;
+}

@@ -23,3 +23,10 @@ test-results/
 /spikes/
 /design/
 /docs/entrega-0.png
+
+# Iconos no usados por el paquete Windows y metadatos del código vendorizado.
+/src-tauri/icons/*
+!/src-tauri/icons/icon.ico
+!/src-tauri/icons/icon.png
+/src-tauri/vendor/sqlx-mysql/.cargo*
+/src-tauri/vendor/sqlx-mysql/Cargo.toml.orig

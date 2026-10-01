@@ -10,11 +10,13 @@ test('explica estados inciertos y presenta ediciones de fila como diferencias si
     const updatePlan = { version: 1, connectionId: project.connectionId, databaseName: project.databaseName, tableName: 'clientes', serverUuid: 'server-fixture', serverVersion: project.serverVersion, primaryKey: [{ column: 'id', value: '42' }], columnName: 'nombre', oldValue: 'Ana', newValue: 'Ana María', compensatesRevisionId: null, rowSha256: 'c'.repeat(64), columnNames: ['id', 'nombre'] }
     const revertPlan = { ...updatePlan, oldValue: 'Ana María', newValue: 'Ana', compensatesRevisionId: 'uncertain-row' }
     const calls: Array<{ command: string; args?: Record<string, unknown> }> = []
-    const w = window as Window & { isTauri?: boolean; __TAURI_INTERNALS__?: { metadata: { currentWindow: { label: string } }; invoke: (command: string, args?: Record<string, unknown>) => Promise<unknown> }; __historyCalls?: typeof calls }
+    const w = window as Window & { isTauri?: boolean; __TAURI_INTERNALS__?: { metadata: { currentWindow: { label: string } }; transformCallback: (callback: (...args: unknown[]) => unknown) => string; invoke: (command: string, args?: Record<string, unknown>) => Promise<unknown> }; __historyCalls?: typeof calls }
     w.isTauri = true
     w.__historyCalls = calls
+    ;(window as Window & { __TAURI_EVENT_PLUGIN_INTERNALS__?: { unregisterListener: (event: string, id: number) => void } }).__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: () => undefined }
     w.__TAURI_INTERNALS__ = {
       metadata: { currentWindow: { label: 'main' } },
+      transformCallback: (callback) => { const key = `__tauri_callback_${Date.now()}_${Math.random()}`; (window as unknown as Record<string, unknown>)[key] = callback; return key },
       invoke: async (command, args = {}) => {
         calls.push({ command, args })
         if (command === 'plugin:event|listen') return 1

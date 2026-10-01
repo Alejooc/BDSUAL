@@ -343,11 +343,11 @@ impl Drop for RestoreDestinationGuard {
                 // populating the destination at the same time this cleanup
                 // task starts. Retry transient server/connection failures so
                 // the provisional database is not left behind by that race.
-                for attempt in 0..50 {
+                for attempt in 0..100 {
                     if sqlx::raw_sql(&statement).execute(&pool).await.is_ok() {
                         return;
                     }
-                    if attempt < 49 {
+                    if attempt < 99 {
                         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                     }
                 }
@@ -3310,9 +3310,10 @@ async fn inspect_mysql_database_on_connection(
 #[cfg(test)]
 mod version_tests {
     use super::{
-        encrypt_mariadb_table_recovery_snapshot, plan_local_view_restore, read_bounded_line,
-        restorable_definition_kind, restore_database_table_stream_with_format,
-        restore_mariadb_encrypted_table_snapshot, rewrite_local_view_schema,
+        encrypt_mariadb_table_recovery_snapshot, encrypt_mysql_table_recovery_snapshot,
+        plan_local_view_restore, read_bounded_line, restorable_definition_kind,
+        restore_database_table_stream_with_format, restore_mariadb_encrypted_table_snapshot,
+        restore_mysql_encrypted_table_snapshot, rewrite_local_view_schema,
         split_mysql_create_table_foreign_keys, strip_local_view_schema,
         supports_mariadb_backup_stage, supports_mysql_backup_lock, trigger_name_matches,
         trigger_target_table, trigger_uses_only_local_qualifiers, valid_table_create_sql,
@@ -3320,6 +3321,16 @@ mod version_tests {
         CanonicalRowSetDigest, MARIADB_STREAM_FORMAT, MYSQL_STREAM_FORMAT,
     };
     use std::collections::HashMap;
+
+    struct TestVaultKey(Option<uuid::Uuid>);
+
+    impl Drop for TestVaultKey {
+        fn drop(&mut self) {
+            if let Some(vault_id) = self.0.take() {
+                let _ = crate::vault::remove_master_key(vault_id);
+            }
+        }
+    }
 
     #[tokio::test]
     async fn restore_provider_rejects_the_other_engine_stream_format_before_connecting() {
@@ -3760,6 +3771,149 @@ mod version_tests {
         crate::vault::remove_master_key(vault_id)
             .expect("remove ephemeral test key from Windows credential store");
         outcome.expect("MariaDB recovery snapshot must round-trip");
+    }
+
+    #[tokio::test]
+    #[ignore = "requiere DBSUAL_MYSQL_TEST_PASSWORD y MySQL 8.0.3+ desechable; indique DBSUAL_MYSQL_TEST_EXPECTED_VERSION"]
+    async fn mysql_recovery_snapshot_round_trips_to_a_new_database() {
+        use crate::history::{self, DatabaseEngine};
+        use sqlx::Row;
+
+        let pool = crate::connections::connect_mysql_test_from_env()
+            .await
+            .expect("connect to disposable MySQL server through application path");
+        let version: String = sqlx::query_scalar("SELECT VERSION()")
+            .fetch_one(&pool)
+            .await
+            .expect("read server version");
+        let expected_version = std::env::var("DBSUAL_MYSQL_TEST_EXPECTED_VERSION")
+            .expect("set expected MySQL version for this test run");
+        assert!(
+            version.contains(&expected_version),
+            "expected MySQL {expected_version}, got {version}"
+        );
+        let database = format!("dbsual_mysql_recovery_{}", uuid::Uuid::new_v4().simple());
+        let restored = format!("{database}_restore");
+        let test_dir = std::env::temp_dir().join(format!(
+            "dbsual-mysql-recovery-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&test_dir).expect("create isolated test directory");
+        let artifact_dir = test_dir.join("artifacts");
+        let storage = crate::storage::open_at(test_dir.join("history.sqlite"))
+            .await
+            .expect("open isolated history metadata");
+        let vault = crate::vault::create_vault().expect("create ephemeral test vault");
+        crate::vault::store_master_key(vault.vault_id, &vault.master_key)
+            .expect("store test vault key");
+        let _vault_key_cleanup = TestVaultKey(Some(vault.vault_id));
+        let vault_id = vault.vault_id;
+        let (master_key, recovery) = vault.artifact_material();
+        let connection_id = uuid::Uuid::new_v4().to_string();
+
+        let outcome: Result<(), String> = async {
+            sqlx::raw_sql(&format!("CREATE DATABASE `{database}`")).execute(&pool).await.map_err(|e| format!("create source database: {e}"))?;
+            sqlx::raw_sql(&format!("CREATE TABLE `{database}`.parent_rows (id INT PRIMARY KEY, label VARCHAR(80) NOT NULL) ENGINE=InnoDB")).execute(&pool).await.map_err(|e| format!("create parent table: {e}"))?;
+            sqlx::raw_sql(&format!("CREATE TABLE `{database}`.child_rows (id INT PRIMARY KEY, parent_id INT NOT NULL, description VARCHAR(80) NOT NULL, payload VARBINARY(16) NOT NULL, optional_text VARCHAR(32) NULL, CONSTRAINT child_parent_fk FOREIGN KEY (parent_id) REFERENCES parent_rows(id)) ENGINE=InnoDB")).execute(&pool).await.map_err(|e| format!("create child table and FK: {e}"))?;
+            sqlx::raw_sql(&format!("CREATE TABLE `{database}`.audit_rows (id INT NOT NULL) ENGINE=InnoDB")).execute(&pool).await.map_err(|e| format!("create trigger audit table: {e}"))?;
+            sqlx::query(&format!("INSERT INTO `{database}`.parent_rows VALUES (1, 'área')")).execute(&pool).await.map_err(|e| format!("insert Unicode parent: {e}"))?;
+            sqlx::query(&format!("INSERT INTO `{database}`.child_rows VALUES (?, ?, ?, ?, ?)"))
+                .bind(1_i32).bind(1_i32).bind("niño 🧪").bind(vec![0_u8, 255, 42]).bind(Option::<String>::None)
+                .execute(&pool).await.map_err(|e| format!("insert child row: {e}"))?;
+            sqlx::raw_sql(&format!("CREATE VIEW `{database}`.child_view AS SELECT id, description FROM `{database}`.child_rows"))
+                .execute(&pool).await.map_err(|e| format!("create local view: {e}"))?;
+            sqlx::raw_sql(&format!("CREATE TRIGGER `{database}`.child_audit AFTER INSERT ON `{database}`.child_rows FOR EACH ROW INSERT INTO `{database}`.audit_rows (id) VALUES (NEW.id)"))
+                .execute(&pool).await.map_err(|e| format!("create simple trigger: {e}"))?;
+            sqlx::raw_sql(&format!("CREATE TRIGGER `{database}`.z_append_a BEFORE INSERT ON `{database}`.child_rows FOR EACH ROW SET NEW.description = CONCAT(NEW.description, 'A')"))
+                .execute(&pool).await.map_err(|e| format!("create first ordered trigger: {e}"))?;
+            sqlx::raw_sql(&format!("CREATE TRIGGER `{database}`.a_append_b BEFORE INSERT ON `{database}`.child_rows FOR EACH ROW SET NEW.description = CONCAT(NEW.description, 'B')"))
+                .execute(&pool).await.map_err(|e| format!("create second ordered trigger: {e}"))?;
+
+            let artifact = encrypt_mysql_table_recovery_snapshot(&pool, &database, artifact_dir.clone(), master_key, recovery)
+                .await.map_err(|e| format!("capture partial recovery point: {e:?}"))?;
+            let project = history::create_project(&storage, &connection_id, &database, DatabaseEngine::Mysql, Some(&version))
+                .await.map_err(|e| format!("create history project: {e:?}"))?;
+            let point = history::create_recovery_point(
+                &storage, &project.id, DatabaseEngine::Mysql, Some(&version), artifact.artifact.artifact_id,
+                &artifact.ciphertext_sha256, artifact.encrypted_bytes, artifact.artifact.plaintext_bytes,
+                "visible_tables_views_triggers", "captured",
+            ).await.map_err(|e| format!("record partial point: {e:?}"))?;
+            if point.coverage != "visible_tables_views_triggers" || point.verification_state != "captured" {
+                return Err(format!("partial recovery point must remain captured, got {}/{}", point.coverage, point.verification_state));
+            }
+            let path = artifact_dir.join(format!("{}.dbsual-artifact", artifact.artifact.artifact_id));
+            let counts = restore_mysql_encrypted_table_snapshot(&pool, &restored, path, vault_id, artifact.artifact.artifact_id, &artifact.ciphertext_sha256, artifact.encrypted_bytes)
+                .await.map_err(|e| format!("restore partial recovery point: {e:?}"))?;
+            if counts != (3, 2) { return Err(format!("expected three tables and two rows, got {counts:?}")); }
+
+            let row: (String, Vec<u8>, Option<String>) = sqlx::query_as(&format!("SELECT description, payload, optional_text FROM `{restored}`.child_rows WHERE id=1"))
+                .fetch_one(&pool).await.map_err(|e| format!("read restored child: {e}"))?;
+            if row != ("niño 🧪".into(), vec![0, 255, 42], None) { return Err(format!("restored data differs: {row:?}")); }
+            let parent: String = sqlx::query_scalar(&format!("SELECT label FROM `{restored}`.parent_rows WHERE id=1"))
+                .fetch_one(&pool).await.map_err(|e| format!("read restored parent: {e}"))?;
+            if parent != "área" { return Err("restored parent Unicode differs".into()); }
+            let view_row: String = sqlx::query_scalar(&format!("SELECT description FROM `{restored}`.child_view WHERE id=1"))
+                .fetch_one(&pool).await.map_err(|e| format!("query restored view: {e}"))?;
+            if view_row != "niño 🧪" { return Err("restored view differs".into()); }
+
+            let fk_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'child_rows' AND REFERENCED_TABLE_NAME = 'parent_rows'")
+                .bind(&restored).fetch_one(&pool).await.map_err(|e| format!("verify restored FK metadata: {e}"))?;
+            if fk_count != 1 { return Err(format!("expected restored FK DDL, got {fk_count}")); }
+            let table_ddl = sqlx::query(&format!("SHOW CREATE TABLE `{restored}`.child_rows")).fetch_one(&pool).await.map_err(|e| format!("read restored table DDL: {e}"))?;
+            let table_ddl: String = table_ddl.try_get(1).map_err(|e| format!("decode restored table DDL: {e}"))?;
+            if !table_ddl.contains("child_parent_fk") || !table_ddl.contains("REFERENCES") { return Err("restored table DDL omits its FK".into()); }
+            let view_ddl = sqlx::query(&format!("SHOW CREATE VIEW `{restored}`.child_view")).fetch_one(&pool).await.map_err(|e| format!("read restored view DDL: {e}"))?;
+            let view_ddl: String = view_ddl.try_get(1).map_err(|e| format!("decode restored view DDL: {e}"))?;
+            if !view_ddl.contains("child_rows") { return Err("restored view DDL does not reference the local table".into()); }
+            let audit_before: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM `{restored}`.audit_rows")).fetch_one(&pool).await.map_err(|e| format!("verify trigger did not replay during restore: {e}"))?;
+            if audit_before != 0 { return Err(format!("trigger replayed during restore: {audit_before}")); }
+            let trigger_body: String = sqlx::query_scalar("SELECT CAST(ACTION_STATEMENT AS CHAR) FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = ? AND TRIGGER_NAME = 'child_audit'")
+                .bind(&restored).fetch_one(&pool).await.map_err(|e| format!("read restored trigger DDL: {e}"))?;
+            if !trigger_body.contains("audit_rows") { return Err("restored trigger DDL differs".into()); }
+            let source_order: Vec<(String, u32)> = sqlx::query_as("SELECT CAST(TRIGGER_NAME AS CHAR), ACTION_ORDER FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = ? AND EVENT_OBJECT_TABLE = 'child_rows' AND ACTION_TIMING = 'BEFORE' AND EVENT_MANIPULATION = 'INSERT' ORDER BY ACTION_ORDER")
+                .bind(&database).fetch_all(&pool).await.map_err(|e| format!("read source trigger order: {e}"))?;
+            let restored_order: Vec<(String, u32)> = sqlx::query_as("SELECT CAST(TRIGGER_NAME AS CHAR), ACTION_ORDER FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = ? AND EVENT_OBJECT_TABLE = 'child_rows' AND ACTION_TIMING = 'BEFORE' AND EVENT_MANIPULATION = 'INSERT' ORDER BY ACTION_ORDER")
+                .bind(&restored).fetch_all(&pool).await.map_err(|e| format!("read restored trigger order: {e}"))?;
+            let expected_trigger_names = ["z_append_a", "a_append_b"];
+            if source_order.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>() != expected_trigger_names {
+                return Err(format!("source ACTION_ORDER differs from creation order: {source_order:?}"));
+            }
+            if restored_order.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>() != expected_trigger_names {
+                return Err(format!("restored ACTION_ORDER differs from source: {restored_order:?}"));
+            }
+            sqlx::query(&format!("INSERT INTO `{restored}`.child_rows VALUES (2, 1, 'post restore', X'01', '')")).execute(&pool).await.map_err(|e| format!("exercise restored trigger: {e}"))?;
+            let ordered_trigger_effect: String = sqlx::query_scalar(&format!("SELECT description FROM `{restored}`.child_rows WHERE id=2"))
+                .fetch_one(&pool).await.map_err(|e| format!("verify ordered trigger effects: {e}"))?;
+            if ordered_trigger_effect != "post restoreAB" { return Err(format!("restored trigger order produced {ordered_trigger_effect:?}")); }
+            let trigger_effect: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM `{restored}`.audit_rows WHERE id=2")).fetch_one(&pool).await.map_err(|e| format!("verify trigger effect: {e}"))?;
+            if trigger_effect != 1 { return Err("restored trigger did not execute".into()); }
+            let points = history::list_recovery_points(&storage, &project.id).await.map_err(|e| format!("reload recovery point: {e:?}"))?;
+            if points.len() != 1 || points[0].verification_state != "captured" || points[0].coverage == "complete" { return Err("restore incorrectly upgraded partial point state".into()); }
+
+            sqlx::raw_sql(&format!("CREATE PROCEDURE `{database}`.unsupported_worker() SELECT 1"))
+                .execute(&pool).await.map_err(|e| format!("create unsupported routine fixture: {e}"))?;
+            let unsupported_artifacts = test_dir.join("unsupported-artifacts");
+            let (probe_key, probe_recovery) = vault.artifact_material();
+            if encrypt_mysql_table_recovery_snapshot(&pool, &database, unsupported_artifacts.clone(), probe_key, probe_recovery)
+                .await.is_ok()
+            {
+                return Err("capture must reject a database containing an unsupported procedure".into());
+            }
+            if std::fs::read_dir(&unsupported_artifacts).is_ok_and(|entries| entries.count() != 0) {
+                return Err("rejected capture published an artifact for an incomplete snapshot".into());
+            }
+            Ok(())
+        }.await;
+
+        let _ = sqlx::raw_sql(&format!("DROP DATABASE IF EXISTS `{restored}`"))
+            .execute(&pool)
+            .await;
+        let _ = sqlx::raw_sql(&format!("DROP DATABASE IF EXISTS `{database}`"))
+            .execute(&pool)
+            .await;
+        storage.close().await;
+        let _ = std::fs::remove_dir_all(&test_dir);
+        outcome.expect("MySQL partial recovery snapshot must round-trip without becoming complete");
     }
 
     #[test]

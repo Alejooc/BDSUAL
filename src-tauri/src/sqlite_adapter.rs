@@ -157,6 +157,7 @@ pub struct SqlitePage {
     has_more: bool,
     next_offset: Option<u64>,
     elapsed_ms: u64,
+    total_rows: Option<u64>,
 }
 
 #[derive(serde::Deserialize)]
@@ -276,6 +277,7 @@ async fn execute_sqlite_read_query_from_pool(
         has_more: page.1,
         next_offset: page.1.then_some(offset + returned_rows as u64),
         elapsed_ms: started.elapsed().as_millis(),
+        total_rows: None,
     })
 }
 
@@ -419,6 +421,34 @@ pub async fn read_sqlite_table_page(
         query.push_str(" ORDER BY ");
         query.push_str(&order);
     }
+    let total_rows = if offset == 0 {
+        let count_query = format!("SELECT COUNT(*) FROM ({query}) AS \"_dbsual_count\"");
+        let mut count = sqlx::query_scalar::<_, i64>(&count_query);
+        if let (Some(mode), Some(value)) = (
+            options.filter_mode.as_deref(),
+            options.filter_value.as_deref(),
+        ) {
+            count = if mode == "contains" {
+                count.bind(format!(
+                    "%{}%",
+                    value
+                        .replace('\\', "\\\\")
+                        .replace('%', "\\%")
+                        .replace('_', "\\_")
+                ))
+            } else {
+                count.bind(value)
+            };
+        }
+        Some(count.fetch_one(&pool).await.map_err(|_| {
+            AppError::new(
+                "QUERY_FAILED",
+                "No se pudo contar los registros de la tabla SQLite.",
+            )
+        })? as u64)
+    } else {
+        None
+    };
     query.push_str(" LIMIT 201 OFFSET ?");
     let started = std::time::Instant::now();
     let mut statement = sqlx::query(&query);
@@ -467,6 +497,7 @@ pub async fn read_sqlite_table_page(
         has_more,
         next_offset: has_more.then_some(offset + returned_rows as u64),
         elapsed_ms: started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+        total_rows,
     })
 }
 

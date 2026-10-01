@@ -10,13 +10,14 @@ test('ejecuta la lectura PostgreSQL mediante su comando IPC y bloquea preparar c
     }
     w.isTauri = true
     w.__postgresSqlCalls = calls
+    ;(window as Window & { __TAURI_EVENT_PLUGIN_INTERNALS__?: { unregisterListener: (event: string, id: number) => void } }).__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: () => undefined }
     w.__TAURI_INTERNALS__ = {
       metadata: { currentWindow: { label: 'main' } },
-      transformCallback: () => '1',
+      transformCallback: (callback) => { const key = `__tauri_callback_${Date.now()}_${Math.random()}`; (window as unknown as Record<string, unknown>)[key] = callback; return key },
       invoke: async (command, args = {}) => {
         calls.push({ command, args })
         if (command === 'plugin:event|listen') return 1
-        if (command === 'bootstrap') return { contractVersion: 1, storageStatus: 'ready', preferences: { version: 1, section: 'explorer', sidebarWidth: 24, sidebarCollapsed: false, bottomHeight: 28, bottomCollapsed: false }, session: { version: 1, tabs: [{ id: 'welcome', kind: 'welcome' }], activeTab: 'welcome' } }
+        if (command === 'bootstrap') return { contractVersion: 1, storageStatus: 'ready', preferences: { version: 1, section: 'explorer', sidebarWidth: 24, sidebarCollapsed: false, bottomHeight: 28, bottomCollapsed: false, theme: 'dark', customColors: { background: '#111316', sidebar: '#17191d', surface: '#15171b', elevated: '#1d2025', border: '#292c32', text: '#e4e6e9', muted: '#858992', accent: '#7778ec' }, fontScale: 'default', sqlFontSize: 14 }, session: { version: 1, tabs: [{ id: 'welcome', kind: 'welcome' }], activeTab: 'welcome' } }
         if (command === 'list_connections') return [{ id: 'pg-test', name: 'PostgreSQL local', engine: 'postgresql', host: '127.0.0.1', port: 5432, user: 'postgres', tlsMode: 'disabled', sshEnabled: false }]
         if (command === 'open_connection') return { id: 'pg-test', state: 'connected', serverVersion: '16.4', tlsActive: false }
         if (command === 'list_databases') return ['postgres']
@@ -30,6 +31,7 @@ test('ejecuta la lectura PostgreSQL mediante su comando IPC y bloquea preparar c
 
   await page.goto('/')
   await page.getByRole('button', { name: 'Abrir editor SQL' }).click()
+  await expect(page.getByRole('button', { name: 'Cerrar Consulta SQL' })).toBeVisible()
   const editor = page.getByRole('region', { name: 'Editor SQL' })
   await expect(editor).toBeVisible({ timeout: 20_000 })
   await editor.getByLabel('Conexión para la consulta').selectOption('pg-test')

@@ -20,7 +20,7 @@ Conecta, explora y consulta distintos motores desde una aplicación de escritori
 
 DBSUAL es un **gestor de bases de datos de escritorio** pensado para reunir conexiones, exploración y consultas SQL en un mismo espacio de trabajo. Su interfaz toma ideas de los entornos de desarrollo modernos: navegación lateral, pestañas y herramientas que puedes tener a mano mientras trabajas.
 
-El proyecto aspira a ser **multiplataforma** y a admitir varios motores sin perder una experiencia coherente. La aplicación está en desarrollo: hoy la compilación, el almacenamiento de credenciales y la validación se centran en Windows; macOS y Linux forman parte del objetivo, pero todavía no son plataformas listas para uso.
+El objetivo es **Windows, macOS y Linux** con una experiencia coherente. Hoy Windows es la única plataforma con aplicación nativa y paquetes comprobados. Hay configuración de compilación inicial para macOS/Linux, pero no hay todavía paquetes ni recorridos nativos validados para uso.
 
 ## Lo que puedes hacer
 
@@ -29,7 +29,7 @@ El proyecto aspira a ser **multiplataforma** y a admitir varios motores sin perd
 | 🔌 | Guardar conexiones a MySQL, MariaDB y PostgreSQL, o abrir archivos SQLite existentes. |
 | 🧭 | Explorar bases, esquemas, tablas, vistas y columnas, según el motor. |
 | 🧮 | Consultar con `SELECT` y revisar datos en cuadrículas con lectura paginada donde está disponible. |
-| 🔐 | Proteger contraseñas de conexión con el Administrador de credenciales de Windows. |
+| 🔐 | Proteger contraseñas de conexión con el almacén seguro del sistema operativo (Windows actualmente). |
 | 🧾 | Revisar un historial local y usar recuperación parcial en algunos recorridos MySQL y MariaDB. |
 
 ### Compatibilidad actual
@@ -45,7 +45,7 @@ Las capacidades varían según el motor y continúan en validación. DBSUAL no s
 
 ## Plataformas
 
-**Objetivo del producto:** Windows, macOS y Linux. **Estado actual:** Windows es la única plataforma configurada y validada por el proyecto. La portabilidad requiere adaptar y comprobar, entre otros componentes, el almacén seguro de credenciales, los instaladores y los recorridos nativos. No se ofrecen todavía paquetes listos para macOS o Linux.
+**Objetivo del producto:** Windows, macOS y Linux. **Estado actual:** Windows es la única plataforma con recorrido y paquetes comprobados. La selección inicial de backends de credenciales y checks de compilación macOS/Linux están configurados, pero aún falta ejecutarlos, probar instalación y completar recorridos nativos. No se ofrecen paquetes listos para macOS o Linux. Ver [spec 019](specs/019-plataformas.md).
 
 ## Empezar en Windows
 
@@ -74,11 +74,13 @@ cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
 cargo test --manifest-path src-tauri/Cargo.toml --locked
 ```
 
-La [integración continua](.github/workflows/ci.yml) ejecuta las comprobaciones en Windows y genera instaladores MSI y NSIS como artefactos temporales. Son paquetes de prueba, aún sin firma de publicación.
+La [integración continua](.github/workflows/ci.yml) ejecuta la suite y genera instaladores MSI/NSIS en Windows; además tiene checks de build para macOS y Linux aún pendientes de validar en CI. Los paquetes Windows son de prueba y no están firmados para publicación.
+
+`npm run test:e2e` compila el frontend y ejecuta Playwright contra el preview de producción en un puerto local dedicado. Los recorridos E2E simulan IPC y no reemplazan la verificación en la ventana Tauri nativa ni contra servidores reales.
 
 ## Seguridad y privacidad
 
-- Las contraseñas de servidor se guardan en el Administrador de credenciales de Windows.
+- En Windows, las contraseñas de servidor se guardan en el Administrador de credenciales. Los backends macOS/Linux y la recuperación ante almacén no disponible siguen pendientes de verificación.
 - Las preferencias y los metadatos no secretos se almacenan localmente en el dispositivo.
 - Las consultas del editor son de solo lectura; las operaciones de cambio disponibles son limitadas y pasan por revisión e historial.
 - No publiques credenciales, bases de datos ni información sensible en issues, capturas o pull requests.

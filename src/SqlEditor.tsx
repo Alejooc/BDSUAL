@@ -5,6 +5,7 @@ import editorWorker from '../node_modules/monaco-editor/esm/vs/editor/editor.wor
 import { AlertCircle, Check, Database, GitBranch, Play, RefreshCw, Square } from 'lucide-react'
 import { ipc, type IpcError, type SavedConnection, type SqlReadResult } from './ipc'
 import { useAppStore } from './store'
+import { isLightBackground } from './theme'
 
 const runtime = self as typeof self & { MonacoEnvironment?: { getWorker: (_moduleId: string, label: string) => Worker } }
 runtime.MonacoEnvironment = { getWorker: () => new editorWorker() }
@@ -35,6 +36,9 @@ function codeOf(error: unknown) { return error && typeof error === 'object' && '
 
 export default function SqlEditor() {
   const sqlFontSize = useAppStore((state) => state.preferences.sqlFontSize)
+  const theme = useAppStore((state) => state.preferences.theme)
+  const customBackground = useAppStore((state) => state.preferences.customColors.background)
+  const editorTheme = theme === 'light' || (theme === 'custom' && isLightBackground(customBackground)) ? 'vs' : 'vs-dark'
   const { update } = useAppStore()
   const [connections, setConnections] = useState<SavedConnection[]>([])
   const [connectionId, setConnectionId] = useState('')
@@ -158,7 +162,7 @@ export default function SqlEditor() {
       <button className="sql-prepare" onClick={() => void prepareChange()} disabled={busy || !connectionId || !database || !query.trim() || selectedConnection?.engine === 'postgresql' || selectedConnection?.engine === 'sqlite'} title={selectedConnection?.engine === 'postgresql' ? 'La preparación de cambios PostgreSQL aún no está disponible' : selectedConnection?.engine === 'sqlite' ? 'SQLite está disponible en modo de solo lectura' : 'Guardar SQL cifrado como borrador para revisión'}><GitBranch size={13} /> Preparar cambio</button>{busy && activeQueryId && selectedConnection?.engine !== 'postgresql' && selectedConnection?.engine !== 'sqlite' && <button className="sql-cancel" onClick={() => void cancel()} disabled={cancelBusy} title="Solicitar a MySQL la cancelación de esta consulta"><Square size={12} fill="currentColor" /> {cancelBusy ? 'Cancelando…' : 'Cancelar'}</button>}<button className="sql-run" onClick={() => void execute()} disabled={busy || !connectionId || !database || !query.trim()} title="Ejecutar la selección o toda la consulta"><Play size={13} fill="currentColor" /> {busy ? 'Ejecutando…' : 'Ejecutar lectura'}</button>
     </div>
     <div className="sql-context"><span>{selectedConnection ? `${selectedConnection.name}  ›  ${database || 'Selecciona una base'}` : 'Selecciona una conexión y una base de datos'}</span><span>Solo SELECT · lectura protegida</span></div>
-    <div className="sql-monaco"><Editor height="100%" language="sql" theme="vs-dark" value={query} onChange={(value) => setQuery(value ?? '')} onMount={(editor) => { editorRef.current = editor }} options={{ minimap: { enabled: false }, lineNumbers: 'on', fontSize: sqlFontSize, tabSize: 2, scrollBeyondLastLine: false, wordWrap: 'on', automaticLayout: true, renderLineHighlight: 'line', padding: { top: 12 } }} /></div>
+    <div className="sql-monaco"><Editor height="100%" language="sql" theme={editorTheme} value={query} onChange={(value) => setQuery(value ?? '')} onMount={(editor) => { editorRef.current = editor }} options={{ minimap: { enabled: false }, lineNumbers: 'on', fontSize: sqlFontSize, tabSize: 2, scrollBeyondLastLine: false, wordWrap: 'on', automaticLayout: true, renderLineHighlight: 'line', padding: { top: 12 } }} /></div>
     <div className="sql-results">
       <div className="sql-results-heading"><span>RESULTADOS</span>{result && <span><Check size={12} /> {result.returnedRows} filas · {result.elapsedMs} ms{result.hasMore ? ' · hay más filas' : ''}</span>}</div>
       {error && <div className="sql-error" role="alert"><AlertCircle size={15} /><span>{error}</span></div>}

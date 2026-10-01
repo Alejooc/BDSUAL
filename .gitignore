@@ -17,9 +17,7 @@ test-results/
 *.tsbuildinfo
 *.log
 
-# Material interno de planificación y exploración no publicado en el repositorio.
-/AGENTS.md
-/specs/
+# Mantener especificaciones y reglas de agentes bajo control de versiones.
 /spikes/
 /design/
 /docs/entrega-0.png

@@ -33,6 +33,7 @@ pub struct TableReadResult {
     has_more: bool,
     next_offset: Option<u64>,
     elapsed_ms: u128,
+    total_rows: Option<u64>,
 }
 
 #[tauri::command]
@@ -215,6 +216,50 @@ async fn read_page(
                 .push(") > 0");
         }
     }
+    let total_rows = if offset == 0 {
+        let mut count_sql = format!(
+            "SELECT COUNT(*) FROM {}.{} AS {}",
+            quote_ident(schema),
+            quote_ident(table),
+            quote_ident("_dbsual_source")
+        );
+        let count = if let (Some(column), Some(mode), Some(value)) = (
+            options.filter_column.as_ref(),
+            options.filter_mode.as_ref(),
+            options.filter_value.as_ref(),
+        ) {
+            if mode == "equals" {
+                count_sql.push_str(&format!(
+                    " WHERE {}.{}::text = $1",
+                    quote_ident("_dbsual_source"),
+                    quote_ident(column)
+                ));
+            } else {
+                count_sql.push_str(&format!(
+                    " WHERE strpos({}.{}::text, $1) > 0",
+                    quote_ident("_dbsual_source"),
+                    quote_ident(column)
+                ));
+            }
+            sqlx::query_scalar::<_, i64>(&count_sql)
+                .bind(value)
+                .fetch_one(pool)
+                .await
+        } else {
+            sqlx::query_scalar::<_, i64>(&count_sql)
+                .fetch_one(pool)
+                .await
+        }
+        .map_err(|_| {
+            TableReadError::new(
+                "QUERY_FAILED",
+                "No se pudo contar los registros de la tabla PostgreSQL.",
+            )
+        })?;
+        Some(count as u64)
+    } else {
+        None
+    };
     let mut order = Vec::<(String, String)>::new();
     if let (Some(column), Some(direction)) = (&options.sort_column, &options.sort_direction) {
         order.push((
@@ -319,6 +364,7 @@ async fn read_page(
         next_offset: (has_more && offset.saturating_add(returned_rows as u64) <= MAX_OFFSET)
             .then_some(offset.saturating_add(returned_rows as u64)),
         elapsed_ms: started.elapsed().as_millis(),
+        total_rows,
     })
 }
 

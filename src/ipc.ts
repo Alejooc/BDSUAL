@@ -1,7 +1,9 @@
 import { invoke, isTauri } from '@tauri-apps/api/core'
 
 export type Section = 'explorer' | 'changes' | 'history'
-export type UiPreferences = { version: 1; section: Section; sidebarWidth: number; sidebarCollapsed: boolean; bottomHeight: number; bottomCollapsed: boolean; theme: 'dark' | 'light' | 'contrast'; fontScale: 'compact' | 'default' | 'large'; sqlFontSize: number }
+export type ThemeName = 'dark' | 'light' | 'contrast' | 'midnight' | 'nord' | 'forest' | 'custom'
+export type ThemeColors = { background: string; sidebar: string; surface: string; elevated: string; border: string; text: string; muted: string; accent: string }
+export type UiPreferences = { version: 1; section: Section; sidebarWidth: number; sidebarCollapsed: boolean; bottomHeight: number; bottomCollapsed: boolean; theme: ThemeName; customColors: ThemeColors; fontScale: 'compact' | 'default' | 'large'; sqlFontSize: number }
 export type SessionTab = { id: 'welcome'; kind: 'welcome' } | { id: 'query'; kind: 'query' }
 export type Session = { version: 1; tabs: SessionTab[]; activeTab: SessionTab['id'] | 'none' }
 export type Bootstrap = { contractVersion: 1; storageStatus: 'ready'; preferences: UiPreferences; session: Session }
@@ -23,7 +25,7 @@ export type ServerProcess = { id: number; user: string | null; host: string | nu
 export type ServerVariable = { name: string; value: string; scope: 'global' }
 export type ColumnMetadata = { name: string; dataType: string; isNullable: boolean; isPrimaryKey: boolean; primaryKeyAvailable: boolean; defaultValue: string | null; defaultAvailable: boolean }
 export type TableStructure = { indexes: Array<{ name: string; unique: boolean; indexType: string; columns: string[] }>; constraints: Array<{ name: string; kind: string; columns: string[]; referencedDatabase: string | null; referencedTable: string | null; referencedColumns: string[] }> }
-export type SqlReadResult = { columns: string[]; rows: Array<Array<string | null>>; returnedRows: number; hasMore: boolean; nextOffset: number | null; elapsedMs: number }
+export type SqlReadResult = { columns: string[]; rows: Array<Array<string | null>>; returnedRows: number; totalRows?: number | null; hasMore: boolean; nextOffset: number | null; elapsedMs: number }
 export type TablePageOptions = { sortColumn: string | null; sortDirection: 'asc' | 'desc' | null; filterColumn: string | null; filterMode: 'equals' | 'contains' | null; filterValue: string | null }
 export type CsvExportResult = { rowsWritten: number }
 export type VaultStatus = { configured: boolean }
@@ -34,12 +36,13 @@ export type RecoveryRestoreSummary = { databaseName: string; tablesRestored: num
 export type RevisionSummary = { id: string; projectId: string; revisionNumber: number; message: string; status: string; recoveryState: string; planSha256: string; artifactId: string; operationCount: number; createdAtMs: number; confirmedAtMs: number | null }
 export type MysqlRowUpdateValue = { column: string; value: string | null }
 export type MysqlRowUpdatePreview = { revision: RevisionSummary; primaryKey: MysqlRowUpdateValue[]; columnName: string; oldValue: string | null; newValue: string | null; operation?: 'update' | 'insert' | 'delete'; values?: MysqlRowUpdateValue[] }
+export type MysqlCsvImportPreview = { revision: RevisionSummary; headers: string[]; rowCount: number; sampleRows: Array<Array<string | null>> }
 export type MysqlBackupInventory = { coverage: 'visible_objects_only'; serverVersion: string; databaseName: string; characterSet: string; collation: string; visibleTablesAreTransactional: boolean; objects: Array<{ name: string; kind: string; engine: string | null }>; routines: Array<{ name: string; kind: string }>; triggers: Array<{ name: string; tableName: string }>; events: string[] }
 export type MysqlBackupInspection = { inventory: MysqlBackupInventory; definitions: Array<{ name: string; kind: string; createSql: string }> }
 
 const defaults: Bootstrap = {
   contractVersion: 1, storageStatus: 'ready',
-  preferences: { version: 1, section: 'explorer', sidebarWidth: 24, sidebarCollapsed: false, bottomHeight: 28, bottomCollapsed: false, theme: 'dark', fontScale: 'default', sqlFontSize: 14 },
+  preferences: { version: 1, section: 'explorer', sidebarWidth: 24, sidebarCollapsed: false, bottomHeight: 28, bottomCollapsed: false, theme: 'dark', customColors: { background: '#111316', sidebar: '#17191d', surface: '#15171b', elevated: '#1d2025', border: '#292c32', text: '#e4e6e9', muted: '#858992', accent: '#7778ec' }, fontScale: 'default', sqlFontSize: 14 },
   session: { version: 1, tabs: [{ id: 'welcome', kind: 'welcome' }], activeTab: 'welcome' },
 }
 let browserState = structuredClone(defaults)
@@ -109,6 +112,8 @@ export const ipc = {
   prepareMysqlRowUpdate: (connectionId: string, databaseName: string, tableName: string, primaryKey: MysqlRowUpdateValue[], columnName: string, newValue: string | null) => backend<MysqlRowUpdatePreview>('prepare_mysql_row_update', { connectionId, databaseName, tableName, primaryKey, columnName, newValue }),
   prepareMysqlRowInsert: (connectionId: string, databaseName: string, tableName: string, values: MysqlRowUpdateValue[]) => backend<MysqlRowUpdatePreview>('prepare_mysql_row_insert', { connectionId, databaseName, tableName, values }),
   prepareMysqlRowRevert: (revisionId: string) => backend<MysqlRowUpdatePreview>('prepare_mysql_row_revert', { revisionId }),
+  prepareMysqlCsvImport: (connectionId: string, databaseName: string, tableName: string, csvText: string, delimiter: 'comma' | 'semicolon' | 'tab', nullMarker: string) => backend<MysqlCsvImportPreview>('prepare_mysql_csv_import', { connectionId, databaseName, tableName, csvText, delimiter, nullMarker }),
+  prepareMysqlCsvImportRevert: (revisionId: string) => backend<MysqlCsvImportPreview>('prepare_mysql_csv_import_revert', { revisionId }),
   applyMysqlRowUpdate: (revisionId: string) => backend<void>('apply_mysql_row_update', { revisionId }),
   prepareCreateDatabase: (connectionId: string, databaseName: string) => backend<RevisionSummary>('prepare_create_database', { connectionId, databaseName }),
   applyCreateDatabase: (revisionId: string) => backend<void>('apply_create_database', { revisionId }),

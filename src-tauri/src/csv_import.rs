@@ -1,7 +1,4 @@
-//! Validación acotada de archivos CSV antes de preparar una importación.
-//!
-//! Este módulo no ejecuta escrituras: convierte el archivo UTF-8 en un conjunto
-//! determinista de encabezados y celdas que el adaptador del motor puede revisar.
+//! Validación acotada de CSV y celdas antes de preparar una revisión de importación.
 
 use serde::{Deserialize, Serialize};
 use std::io::Read;
@@ -9,6 +6,9 @@ use std::io::Read;
 const MAX_CSV_BYTES: u64 = 5 * 1024 * 1024;
 const MAX_CSV_ROWS: usize = 50_000;
 const MAX_CSV_COLUMNS: usize = 512;
+/// Tope del plan serializado que puede convertirse en un artefacto cifrado.
+pub(crate) const MAX_IMPORT_PLAN_BYTES: usize = 2 * 1024 * 1024;
+pub(crate) const MAX_IMPORT_ROWS: usize = 10_000;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -16,6 +16,66 @@ pub(crate) struct ParsedCsv {
     pub headers: Vec<String>,
     /// `None` representa únicamente el marcador NULL configurado.
     pub rows: Vec<Vec<Option<String>>>,
+}
+
+/// Resumen serializable seguro para la vista de revisión; no incluye el archivo original.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CsvBatchPreview {
+    pub headers: Vec<String>,
+    pub row_count: usize,
+    pub sample_rows: Vec<Vec<Option<String>>>,
+}
+
+pub(crate) fn preview(headers: &[String], rows: &[Vec<Option<String>>]) -> CsvBatchPreview {
+    CsvBatchPreview {
+        headers: headers.to_vec(),
+        row_count: rows.len(),
+        sample_rows: rows.iter().take(5).cloned().collect(),
+    }
+}
+
+/// Rechaza claves ausentes, NULL y duplicadas dentro del archivo antes de consultar el destino.
+/// Las claves se comparan como celdas CSV decodificadas, preservando NULL/texto y orden compuesto.
+pub(crate) fn validate_unique_primary_keys(
+    parsed: &ParsedCsv,
+    primary_key_columns: &[String],
+) -> Result<(), CsvImportError> {
+    if parsed.rows.is_empty()
+        || parsed.rows.len() > MAX_IMPORT_ROWS
+        || primary_key_columns.is_empty()
+    {
+        return Err(CsvImportError::InvalidCsv);
+    }
+    let indexes = primary_key_columns
+        .iter()
+        .map(|column| {
+            parsed
+                .headers
+                .iter()
+                .position(|header| header == column)
+                .ok_or(CsvImportError::InvalidHeaders)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut keys = std::collections::HashSet::with_capacity(parsed.rows.len());
+    for row in &parsed.rows {
+        let key = indexes
+            .iter()
+            .map(|index| row.get(*index).cloned().ok_or(CsvImportError::InvalidCsv))
+            .collect::<Result<Vec<_>, _>>()?;
+        if key.iter().any(Option::is_none) || !keys.insert(key) {
+            return Err(CsvImportError::InvalidHeaders);
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn enforce_plan_size<T: Serialize>(plan: &T) -> Result<Vec<u8>, CsvImportError> {
+    let bytes = serde_json::to_vec(plan).map_err(|_| CsvImportError::InvalidCsv)?;
+    if bytes.len() > MAX_IMPORT_PLAN_BYTES {
+        return Err(CsvImportError::TooLarge);
+    }
+    Ok(bytes)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -176,5 +236,53 @@ mod tests {
             parse("id,name\n".as_bytes(), CsvDelimiter::Comma, "NULL"),
             Err(CsvImportError::InvalidCsv)
         );
+    }
+
+    #[test]
+    fn batch_preview_is_sampled_and_duplicate_or_null_keys_are_rejected() {
+        let parsed = parse(
+            "id,name\n1,Ana\n2,Bea\n".as_bytes(),
+            CsvDelimiter::Comma,
+            "NULL",
+        )
+        .unwrap();
+        let preview = preview(&parsed.headers, &parsed.rows);
+        assert_eq!(preview.row_count, 2);
+        assert_eq!(preview.sample_rows.len(), 2);
+        assert_eq!(
+            validate_unique_primary_keys(&parsed, &["id".into()]),
+            Ok(())
+        );
+
+        let duplicate = parse(
+            "id,name\n1,Ana\n1,Bea\n".as_bytes(),
+            CsvDelimiter::Comma,
+            "NULL",
+        )
+        .unwrap();
+        assert_eq!(
+            validate_unique_primary_keys(&duplicate, &["id".into()]),
+            Err(CsvImportError::InvalidHeaders)
+        );
+        let null_key = parse(
+            "id,name\nNULL,Ana\n".as_bytes(),
+            CsvDelimiter::Comma,
+            "NULL",
+        )
+        .unwrap();
+        assert_eq!(
+            validate_unique_primary_keys(&null_key, &["id".into()]),
+            Err(CsvImportError::InvalidHeaders)
+        );
+    }
+
+    #[test]
+    fn import_plan_size_is_capped() {
+        #[derive(Serialize)]
+        struct Plan(String);
+        let small = Plan("ok".into());
+        assert!(enforce_plan_size(&small).is_ok());
+        let large = Plan("x".repeat(MAX_IMPORT_PLAN_BYTES));
+        assert_eq!(enforce_plan_size(&large), Err(CsvImportError::TooLarge));
     }
 }

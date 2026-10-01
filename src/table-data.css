@@ -128,6 +128,29 @@
   position: relative;
 }
 
+.table-data-load-sentinel {
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  color: #9297a5;
+  font-size: 11px;
+}
+
+.table-data-footer {
+  flex-wrap: wrap;
+  font: 11px 'DM Sans', sans-serif;
+}
+
+.table-data-end-state {
+  color: #858b9a;
+}
+
+@media (max-width: 900px) {
+  .table-data-end-state { flex-basis: 100%; }
+}
+
 .table-data-grid .table-data-result-table {
   width: max-content;
   min-width: 100%;

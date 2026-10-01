@@ -6,10 +6,11 @@ test('inserta una fila MySQL tras revisar y prepara su compensación como otra r
     let status = 'draft'
     let inserted = false
     let revisionId = 'insert-revision'
-    const w = window as Window & { isTauri?: boolean; __TAURI_INTERNALS__?: { metadata: { currentWindow: { label: string } }; invoke: (command: string, args?: Record<string, unknown>) => Promise<unknown> }; __insertCalls?: typeof calls }
+    const w = window as Window & { isTauri?: boolean; __TAURI_INTERNALS__?: { metadata: { currentWindow: { label: string } }; transformCallback: (callback: (...args: unknown[]) => unknown) => string; invoke: (command: string, args?: Record<string, unknown>) => Promise<unknown> }; __insertCalls?: typeof calls }
     w.isTauri = true
     w.__insertCalls = calls
-    w.__TAURI_INTERNALS__ = { metadata: { currentWindow: { label: 'main' } }, invoke: async (command, args = {}) => {
+    ;(window as Window & { __TAURI_EVENT_PLUGIN_INTERNALS__?: { unregisterListener: (event: string, id: number) => void } }).__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: () => undefined }
+    w.__TAURI_INTERNALS__ = { metadata: { currentWindow: { label: 'main' } }, transformCallback: (callback) => { const key = `__tauri_callback_${Date.now()}_${Math.random()}`; (window as unknown as Record<string, unknown>)[key] = callback; return key }, invoke: async (command, args = {}) => {
       calls.push({ command, args })
       if (command === 'plugin:event|listen') return 1
       if (command === 'plugin:event|unlisten' || command === 'save_ui_preferences' || command === 'save_session' || command === 'confirm_history_revision') { if (command === 'confirm_history_revision') status = 'confirmed'; return undefined }

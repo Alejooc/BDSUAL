@@ -44,6 +44,7 @@ pub struct SqlReadResult {
     pub(crate) has_more: bool,
     pub(crate) next_offset: Option<u64>,
     pub(crate) elapsed_ms: u128,
+    pub(crate) total_rows: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1061,8 +1062,66 @@ pub(crate) async fn run_table_page_registered(
                 .join(", "),
         );
     }
-    run_read_query_registered_with_bind(pool, database, sql, offset, registration, bind_value, true)
-        .await
+    let total_rows = if offset == 0 {
+        let quoted_database = quote_mysql_identifier(&database);
+        let mut count_sql =
+            format!("SELECT COUNT(*) FROM {quoted_database}.{quoted_table} AS {table_alias}");
+        if let Some(value) = bind_value.as_ref() {
+            let column = quote_mysql_identifier(options.filter_column.as_deref().ok_or(
+                SqlReadError::new("INVALID_TABLE_QUERY_OPTIONS", "El filtro no es válido."),
+            )?);
+            match options.filter_mode.as_deref() {
+                Some("equals") => count_sql.push_str(&format!(" WHERE CAST({column} AS CHAR) = ?")),
+                Some("contains") => {
+                    count_sql.push_str(&format!(" WHERE LOCATE(?, CAST({column} AS CHAR)) > 0"))
+                }
+                _ => {
+                    return Err(SqlReadError::new(
+                        "INVALID_TABLE_QUERY_OPTIONS",
+                        "El filtro no es válido.",
+                    ))
+                }
+            }
+            Some(
+                sqlx::query_scalar::<_, i64>(&count_sql)
+                    .bind(value)
+                    .fetch_one(&pool)
+                    .await
+                    .map_err(|_| {
+                        SqlReadError::new(
+                            "QUERY_FAILED",
+                            "No se pudo contar los registros de la tabla.",
+                        )
+                    })? as u64,
+            )
+        } else {
+            Some(
+                sqlx::query_scalar::<_, i64>(&count_sql)
+                    .fetch_one(&pool)
+                    .await
+                    .map_err(|_| {
+                        SqlReadError::new(
+                            "QUERY_FAILED",
+                            "No se pudo contar los registros de la tabla.",
+                        )
+                    })? as u64,
+            )
+        }
+    } else {
+        None
+    };
+    let mut result = run_read_query_registered_with_bind(
+        pool,
+        database,
+        sql,
+        offset,
+        registration,
+        bind_value,
+        true,
+    )
+    .await?;
+    result.total_rows = total_rows;
+    Ok(result)
 }
 
 pub(crate) async fn run_read_query_registered(
@@ -1278,6 +1337,7 @@ async fn run_read_query_registered_with_bind(
         has_more,
         next_offset,
         elapsed_ms: started.elapsed().as_millis(),
+        total_rows: None,
     })
 }
 

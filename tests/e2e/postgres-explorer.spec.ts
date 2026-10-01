@@ -5,13 +5,15 @@ test('agrupa objetos PostgreSQL por esquema y envía el esquema al cargar column
     const calls: Array<{ command: string; args?: Record<string, unknown> }> = []
     const w = window as Window & {
       isTauri?: boolean
-      __TAURI_INTERNALS__?: { metadata: { currentWindow: { label: string } }; invoke: (command: string, args?: Record<string, unknown>) => Promise<unknown> }
+      __TAURI_INTERNALS__?: { metadata: { currentWindow: { label: string } }; transformCallback: (callback: (...args: unknown[]) => unknown) => string; invoke: (command: string, args?: Record<string, unknown>) => Promise<unknown> }
       __postgresCalls?: typeof calls
     }
     w.isTauri = true
     w.__postgresCalls = calls
+    ;(window as Window & { __TAURI_EVENT_PLUGIN_INTERNALS__?: { unregisterListener: (event: string, id: number) => void } }).__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: () => undefined }
     w.__TAURI_INTERNALS__ = {
       metadata: { currentWindow: { label: 'main' } },
+      transformCallback: (callback) => { const key = `__tauri_callback_${Date.now()}_${Math.random()}`; (window as unknown as Record<string, unknown>)[key] = callback; return key },
       invoke: async (command, args = {}) => {
         calls.push({ command, args })
         if (command === 'plugin:event|listen') return 1

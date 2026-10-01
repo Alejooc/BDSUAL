@@ -9,6 +9,19 @@ edition = "2021"
 name = "dbsual_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[[bin]]
+name = "dbsual"
+path = "src/main.rs"
+test = false
+
+[features]
+tauri-mock-ipc-tests = []
+
+[[test]]
+name = "tauri_mock_ipc"
+path = "tests/tauri_mock_ipc.rs"
+required-features = ["tauri-mock-ipc-tests"]
+
 [build-dependencies]
 tauri-build = { version = "=2.7.0", features = [] }
 
@@ -30,6 +43,9 @@ sha2 = "=0.11.0"
 csv = "=1.4.0"
 futures-util = "0.3"
 zeroize = { version = "=1.9.0", features = ["derive"] }
+
+[dev-dependencies]
+tauri = { version = "=2.12.0", features = ["test"] }
 
 [patch.crates-io]
 sqlx-mysql = { path = "vendor/sqlx-mysql" }

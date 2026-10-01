@@ -1,8 +1,8 @@
 mod connections;
-#[allow(dead_code)] // Validador aislado hasta conectar el flujo de importación.
 mod csv_import;
 pub mod history;
 pub mod mysql_backup;
+mod mysql_csv_batch;
 mod mysql_database_ops;
 mod mysql_row_change;
 pub mod postgres;
@@ -96,6 +96,7 @@ impl AppError {
 
 struct AppState {
     storage: Result<SqlitePool, AppError>,
+    artifacts_directory: std::path::PathBuf,
     active: connections::ActiveConnections,
     active_postgres:
         tokio::sync::Mutex<std::collections::HashMap<String, postgres::PostgresConnection>>,
@@ -640,7 +641,7 @@ async fn restore_recovery_point(
             "La restauración requiere una revisión confirmada y compatible del historial.",
         ));
     }
-    let encrypted_plan = read_history_plan(state.clone(), app.clone(), revision_id.clone()).await?;
+    let encrypted_plan = read_history_plan(state.clone(), revision_id.clone()).await?;
     let plan: RestoreRevisionPlan = serde_json::from_str(&encrypted_plan).map_err(|_| {
         AppError::history(
             "HISTORY_ARTIFACT_UNAVAILABLE",
@@ -1063,7 +1064,6 @@ async fn confirm_history_revision(
 #[tauri::command]
 async fn read_history_plan(
     state: tauri::State<'_, AppState>,
-    app: tauri::AppHandle,
     revision_id: String,
 ) -> Result<String, AppError> {
     if uuid::Uuid::parse_str(&revision_id).is_err() {
@@ -1072,36 +1072,45 @@ async fn read_history_plan(
             "La revisión del historial no es válida.",
         ));
     }
+    let storage_pool = state.pool()?;
+    let vault_id = local_vault_id(storage_pool).await?.ok_or_else(|| {
+        AppError::history(
+            "VAULT_KEYRING_UNAVAILABLE",
+            "No se pudo abrir la clave del depósito.",
+        )
+    })?;
+    read_history_plan_from(
+        storage_pool,
+        &state.artifacts_directory,
+        revision_id,
+        vault_id,
+    )
+    .await
+}
+
+/// Lee el plan desde el artefacto local autenticando bóveda, ID e integridad del contenido.
+/// La ruta explícita permite verificar el mismo lector con almacenamiento aislado en integración.
+async fn read_history_plan_from(
+    storage_pool: &SqlitePool,
+    artifact_directory: &std::path::Path,
+    revision_id: String,
+    vault_id: uuid::Uuid,
+) -> Result<String, AppError> {
     let artifact: Option<(String, String)> =
         sqlx::query_as("SELECT artifact_id, plan_sha256 FROM history_revisions WHERE id = ?")
             .bind(&revision_id)
-            .fetch_optional(state.pool()?)
+            .fetch_optional(storage_pool)
             .await
             .map_err(|_| AppError::storage())?;
     let (artifact_id, expected_hash) = artifact
-        .and_then(|(id, hash)| {
-            uuid::Uuid::parse_str(&id)
-                .ok()
-                .map(|artifact_id| (artifact_id, hash))
-        })
+        .and_then(|(id, hash)| uuid::Uuid::parse_str(&id).ok().map(|id| (id, hash)))
         .ok_or_else(|| {
             AppError::history(
                 "HISTORY_ARTIFACT_UNAVAILABLE",
                 "El plan cifrado de esta revisión no está disponible.",
             )
         })?;
-    let vault_id = local_vault_id(state.pool()?).await?.ok_or_else(|| {
-        AppError::history(
-            "VAULT_KEYRING_UNAVAILABLE",
-            "No se pudo abrir la clave del depósito.",
-        )
-    })?;
-    let path = app
-        .path()
-        .app_data_dir()
-        .map_err(|_| AppError::storage())?
-        .join("artifacts")
-        .join(format!("{artifact_id}.dbsual-artifact"));
+    let path = artifact_directory.join(format!("{artifact_id}.dbsual-artifact"));
     tauri::async_runtime::spawn_blocking(move || {
         let metadata = std::fs::metadata(&path).map_err(|_| vault::VaultError::IoFailure)?;
         if metadata.len() > 256 * 1024 {
@@ -1519,7 +1528,6 @@ async fn prepare_create_database(
 #[tauri::command]
 async fn apply_create_database(
     state: tauri::State<'_, AppState>,
-    app: tauri::AppHandle,
     revision_id: String,
 ) -> Result<(), AppError> {
     if uuid::Uuid::parse_str(&revision_id).is_err() {
@@ -1562,7 +1570,7 @@ async fn apply_create_database(
                 "Abre la conexión de destino antes de aplicar.",
             )
         })?;
-    let plan = read_history_plan(state.clone(), app, revision_id.clone()).await?;
+    let plan = read_history_plan(state.clone(), revision_id.clone()).await?;
     mysql_database_ops::apply_create_database_revision(
         pool,
         &active,
@@ -1880,6 +1888,8 @@ pub struct UiPreferences {
     #[serde(default)]
     theme: ThemePreference,
     #[serde(default)]
+    custom_colors: ThemeColors,
+    #[serde(default)]
     font_scale: FontScalePreference,
     #[serde(default = "default_sql_font_size")]
     sql_font_size: u8,
@@ -1895,10 +1905,63 @@ enum ThemePreference {
     Dark,
     Light,
     Contrast,
+    Midnight,
+    Nord,
+    Forest,
+    Custom,
 }
 impl Default for ThemePreference {
     fn default() -> Self {
         Self::Dark
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ThemeColors {
+    background: String,
+    sidebar: String,
+    surface: String,
+    elevated: String,
+    border: String,
+    text: String,
+    muted: String,
+    accent: String,
+}
+
+impl Default for ThemeColors {
+    fn default() -> Self {
+        Self {
+            background: "#111316".into(),
+            sidebar: "#17191D".into(),
+            surface: "#15171B".into(),
+            elevated: "#1D2025".into(),
+            border: "#292C32".into(),
+            text: "#E4E6E9".into(),
+            muted: "#858992".into(),
+            accent: "#7778EC".into(),
+        }
+    }
+}
+
+impl ThemeColors {
+    fn is_valid(&self) -> bool {
+        [
+            &self.background,
+            &self.sidebar,
+            &self.surface,
+            &self.elevated,
+            &self.border,
+            &self.text,
+            &self.muted,
+            &self.accent,
+        ]
+        .into_iter()
+        .all(|color| {
+            color.len() == 7
+                && color.starts_with('#')
+                && color[1..].bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
     }
 }
 
@@ -1925,6 +1988,7 @@ impl Default for UiPreferences {
             bottom_height: 28,
             bottom_collapsed: false,
             theme: ThemePreference::Dark,
+            custom_colors: ThemeColors::default(),
             font_scale: FontScalePreference::Default,
             sql_font_size: 14,
         }
@@ -1937,6 +2001,7 @@ impl UiPreferences {
             && (15..=45).contains(&self.sidebar_width)
             && (15..=60).contains(&self.bottom_height)
             && (12..=20).contains(&self.sql_font_size)
+            && self.custom_colors.is_valid()
     }
 
     fn normalized(mut self) -> Self {
@@ -2084,9 +2149,12 @@ pub fn run() {
                 history::reconcile_interrupted_applications(&pool).await?;
                 Ok::<_, AppError>(pool)
             });
-            let ssh_known_hosts_path = app.path().app_data_dir()?.join("ssh_known_hosts");
+            let app_data_directory = app.path().app_data_dir()?;
+            let ssh_known_hosts_path = app_data_directory.join("ssh_known_hosts");
+            let artifacts_directory = app_data_directory.join("artifacts");
             app.manage(AppState {
                 storage,
+                artifacts_directory,
                 active: connections::ActiveConnections::default(),
                 active_postgres: tokio::sync::Mutex::new(std::collections::HashMap::new()),
                 active_sqlite: tokio::sync::Mutex::new(std::collections::HashMap::new()),
@@ -2117,6 +2185,8 @@ pub fn run() {
             mysql_row_change::prepare_mysql_row_insert,
             mysql_row_change::prepare_mysql_row_revert,
             mysql_row_change::apply_mysql_row_update,
+            mysql_csv_batch::prepare_mysql_csv_import,
+            mysql_csv_batch::prepare_mysql_csv_import_revert,
             get_vault_status,
             begin_vault_setup,
             confirm_vault_setup,
@@ -2473,6 +2543,41 @@ mod tests {
     }
 
     #[test]
+    fn preferences_reject_invalid_custom_colors() {
+        let mut preferences = UiPreferences::default();
+        preferences.custom_colors.accent = "#GG00FF".into();
+        assert!(!preferences.is_valid());
+
+        preferences.custom_colors.accent = "#12345".into();
+        assert!(!preferences.is_valid());
+    }
+
+    #[test]
+    fn legacy_preferences_default_custom_colors_without_losing_other_values() {
+        let legacy = serde_json::json!({
+            "version": 1,
+            "section": "history",
+            "sidebarWidth": 31,
+            "sidebarCollapsed": true,
+            "bottomHeight": 42,
+            "bottomCollapsed": false,
+            "theme": "light",
+            "fontScale": "large",
+            "sqlFontSize": 18
+        });
+        let preferences: UiPreferences = serde_json::from_value(legacy)
+            .expect("old preferences without customColors should load");
+
+        assert_eq!(preferences.theme, ThemePreference::Light);
+        assert_eq!(preferences.section, Section::History);
+        assert_eq!(preferences.sidebar_width, 31);
+        assert_eq!(preferences.font_scale, FontScalePreference::Large);
+        assert_eq!(preferences.sql_font_size, 18);
+        assert_eq!(preferences.custom_colors, ThemeColors::default());
+        assert!(preferences.is_valid());
+    }
+
+    #[test]
     fn session_rejects_unexpected_tabs() {
         let mut session = Session::default();
         session.tabs[0].kind = "query".into();
@@ -2549,4 +2654,82 @@ mod tests {
             removal.expect("Windows released the closed SQLite file lock");
         });
     }
+
+    #[tokio::test]
+    async fn history_plan_reader_authenticates_real_artifact_and_history_hash() {
+        let directory = TestDirectory(
+            std::env::temp_dir().join(format!("dbsual-history-reader-{}", uuid::Uuid::new_v4())),
+        );
+        std::fs::create_dir_all(&directory.0).unwrap();
+        let artifact_directory = directory.0.join("artifacts");
+        let pool = storage::open_at(directory.0.join("history.sqlite"))
+            .await
+            .expect("open isolated history storage");
+        let test_vault = vault::create_vault().expect("create test vault");
+        vault::store_master_key(test_vault.vault_id, &test_vault.master_key)
+            .expect("store isolated key in the Windows credential store");
+        let _key_cleanup = TestVaultKey(Some(test_vault.vault_id));
+        let plan = br#"{"connectionId":"test-connection","operation":"update"}"#;
+        let plan_hash = Sha256::digest(plan)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let artifact = vault::encrypt_artifact_bytes_to_file(
+            &artifact_directory,
+            plan,
+            test_vault.vault_id,
+            &test_vault.master_key,
+            &test_vault.recovery_envelope,
+        )
+        .expect("publish authenticated plan artifact");
+        let project = history::create_project(
+            &pool,
+            "test-connection",
+            "test-database",
+            history::DatabaseEngine::Mysql,
+            Some("8.4.11"),
+        )
+        .await
+        .expect("create isolated history project");
+        let revision = history::create_draft(
+            &pool,
+            &project.id,
+            "Actualizar fila",
+            &plan_hash,
+            artifact.artifact_id,
+            1,
+            history::RecoveryState::Pending,
+        )
+        .await
+        .expect("persist history reference to artifact");
+
+        let recovered = read_history_plan_from(
+            &pool,
+            &artifact_directory,
+            revision.id.clone(),
+            test_vault.vault_id,
+        )
+        .await
+        .expect("decrypt and verify plan by history reference");
+        assert_eq!(recovered.as_bytes(), plan);
+
+        let artifact_path =
+            artifact_directory.join(format!("{}.dbsual-artifact", artifact.artifact_id));
+        let mut tampered = std::fs::read(&artifact_path).unwrap();
+        *tampered.last_mut().expect("artifact contains a footer") ^= 1;
+        std::fs::write(&artifact_path, tampered).unwrap();
+        assert!(read_history_plan_from(
+            &pool,
+            &artifact_directory,
+            revision.id,
+            test_vault.vault_id,
+        )
+        .await
+        .is_err());
+        pool.close().await;
+    }
 }
+
+#[cfg(any(test, feature = "tauri-mock-ipc-tests"))]
+#[path = "tauri_mock_ipc_tests.rs"]
+pub mod tauri_mock_ipc_tests;

@@ -2,7 +2,7 @@ import { create } from 'zustand'
 import { ipc, type IpcError, type Section, type Session, type UiPreferences } from './ipc'
 
 type Store = { preferences: UiPreferences; session: Session; booting: boolean; error: IpcError | null; layoutEpoch: number; boot: () => Promise<void>; update: (patch: Partial<UiPreferences>) => void; setSession: (session: Session) => void; reset: () => Promise<void>; flush: () => Promise<void>; reportError: (error: IpcError) => void; clearError: () => void }
-const initial: UiPreferences = { version: 1, section: 'explorer', sidebarWidth: 24, sidebarCollapsed: false, bottomHeight: 28, bottomCollapsed: false, theme: 'dark', fontScale: 'default', sqlFontSize: 14 }
+const initial: UiPreferences = { version: 1, section: 'explorer', sidebarWidth: 24, sidebarCollapsed: false, bottomHeight: 28, bottomCollapsed: false, theme: 'dark', customColors: { background: '#111316', sidebar: '#17191d', surface: '#15171b', elevated: '#1d2025', border: '#292c32', text: '#e4e6e9', muted: '#858992', accent: '#7778ec' }, fontScale: 'default', sqlFontSize: 14 }
 const initialSession: Session = { version: 1, tabs: [{ id: 'welcome', kind: 'welcome' }], activeTab: 'welcome' }
 let saveTimer: ReturnType<typeof setTimeout> | undefined
 export const useAppStore = create<Store>((set, get) => ({

@@ -12,18 +12,18 @@ test('muestra el espacio inicial y cambia entre secciones vacías', async ({ pag
   await expect(page.getByText('Sin historial todavía')).toBeVisible()
 })
 
-test('permite cerrar Bienvenida y regresar a Inicio desde la barra superior', async ({ page }) => {
+test('permite cerrar Bienvenida y regresar a Inicio desde el área vacía', async ({ page }) => {
   await page.goto('/')
   await page.getByRole('button', { name: 'Cerrar Bienvenida' }).click()
   await expect(page.getByRole('heading', { name: 'No hay pestañas abiertas' })).toBeVisible()
-  await page.locator('.titlebar-home[aria-label="Abrir Inicio"]').click()
+  await page.getByRole('button', { name: 'Abrir Inicio' }).click()
   await expect(page.getByRole('heading', { name: /Tu trabajo/ })).toBeVisible()
   await page.getByRole('button', { name: 'Cerrar Bienvenida' }).click()
-  await page.locator('.tab-action').click()
+  await page.locator('.empty-workspace').getByRole('button', { name: 'Nueva consulta SQL' }).click()
   await expect(page.getByRole('button', { name: 'Cerrar Consulta SQL' })).toBeVisible()
   await page.getByRole('button', { name: 'Cerrar Consulta SQL' }).click()
   await expect(page.getByRole('heading', { name: 'No hay pestañas abiertas' })).toBeVisible()
-  await page.locator('.titlebar-home[aria-label="Abrir Inicio"]').click()
+  await page.getByRole('button', { name: 'Abrir Inicio' }).click()
   await expect(page.getByRole('heading', { name: /Tu trabajo/ })).toBeVisible()
 })
 
@@ -101,11 +101,13 @@ test('prepara, confirma y aplica la creación MySQL sin ejecutarla antes de apli
     const calls: Array<{ command: string; args?: Record<string, unknown> }> = []
     let revision = { id: 'revision-test', projectId: project.id, revisionNumber: 1, message: 'Crear base de datos', status: 'draft', recoveryState: 'not_required', planSha256: 'a'.repeat(64), artifactId: 'artifact-test', operationCount: 1, createdAtMs: 2, confirmedAtMs: null as number | null }
     let databases = ['existing_catalog']
-    const w = window as Window & { isTauri?: boolean; __TAURI_INTERNALS__?: { metadata: { currentWindow: { label: string } }; invoke: (command: string, args?: Record<string, unknown>) => Promise<unknown> }; __creationCalls?: typeof calls }
+    const w = window as Window & { isTauri?: boolean; __TAURI_INTERNALS__?: { metadata: { currentWindow: { label: string } }; transformCallback: (callback: (...args: unknown[]) => unknown) => string; invoke: (command: string, args?: Record<string, unknown>) => Promise<unknown> }; __creationCalls?: typeof calls }
     w.isTauri = true
     w.__creationCalls = calls
+    ;(window as Window & { __TAURI_EVENT_PLUGIN_INTERNALS__?: { unregisterListener: (event: string, id: number) => void } }).__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: () => undefined }
     w.__TAURI_INTERNALS__ = {
       metadata: { currentWindow: { label: 'main' } },
+      transformCallback: (callback) => { const key = `__tauri_callback_${Date.now()}_${Math.random()}`; (window as unknown as Record<string, unknown>)[key] = callback; return key },
       invoke: async (command, args = {}) => {
         calls.push({ command, args })
         if (command === 'plugin:event|listen') return 1
@@ -135,7 +137,7 @@ test('prepara, confirma y aplica la creación MySQL sin ejecutarla antes de apli
   })
   await page.goto('/')
   await page.getByRole('button', { name: 'Abrir conexión' }).click()
-  await expect(page.getByText('MySQL 8.4.11')).toBeVisible()
+  await expect(page.getByTitle('Desconectar')).toBeVisible()
   await page.getByRole('button', { name: 'Expandir Local' }).click()
   await expect(page.getByText('existing_catalog')).toBeVisible()
   await page.getByRole('button', { name: 'Preparar creación de base de datos' }).click()
@@ -170,11 +172,13 @@ test('captura y ofrece restaurar un punto MariaDB desde el historial', async ({ 
     const project = { id: 'project-maria', connectionId: 'connection-maria', databaseName: 'catalogo', engine: 'mariadb', serverVersion: '10.11.19', createdAtMs: 1 }
     const point = { id: 'point-maria', projectId: project.id, engine: 'mariadb', serverVersion: '10.11.19', artifactId: 'artifact-maria', ciphertextSha256: 'a'.repeat(64), encryptedBytes: 4096, plaintextBytes: 2048, coverage: 'visible_tables_views_triggers', verificationState: 'captured', protectedRevisionId: null, createdAtMs: 2 }
     let revision: Record<string, unknown> | null = null
-    const w = window as Window & { isTauri?: boolean; __TAURI_INTERNALS__?: { metadata: { currentWindow: { label: string } }; invoke: (command: string, args?: Record<string, unknown>) => Promise<unknown> }; __recoveryCalls?: typeof calls }
+    const w = window as Window & { isTauri?: boolean; __TAURI_INTERNALS__?: { metadata: { currentWindow: { label: string } }; transformCallback: (callback: (...args: unknown[]) => unknown) => string; invoke: (command: string, args?: Record<string, unknown>) => Promise<unknown> }; __recoveryCalls?: typeof calls }
     w.isTauri = true
     w.__recoveryCalls = calls
+    ;(window as Window & { __TAURI_EVENT_PLUGIN_INTERNALS__?: { unregisterListener: (event: string, id: number) => void } }).__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: () => undefined }
     w.__TAURI_INTERNALS__ = {
       metadata: { currentWindow: { label: 'main' } },
+      transformCallback: (callback) => { const key = `__tauri_callback_${Date.now()}_${Math.random()}`; (window as unknown as Record<string, unknown>)[key] = callback; return key },
       invoke: async (command, args = {}) => {
         calls.push({ command, args })
         if (command === 'plugin:event|listen') return 1
@@ -207,7 +211,7 @@ test('captura y ofrece restaurar un punto MariaDB desde el historial', async ({ 
   })
   await page.goto('/')
   await page.getByRole('button', { name: 'Abrir conexión' }).click()
-  await expect(page.getByText('MariaDB 10.11.19')).toBeVisible()
+  await expect(page.getByTitle('Desconectar')).toBeVisible()
   await page.getByRole('button', { name: 'Historial', exact: true }).click()
   await expect(page.getByRole('button', { name: 'Capturar punto cifrado' })).toBeVisible()
   await page.getByRole('button', { name: 'Capturar punto cifrado' }).click()

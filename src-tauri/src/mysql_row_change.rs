@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::{mysql::MySqlRow, MySqlPool, Row, ValueRef};
 use std::io::Read;
-use tauri::Manager;
 use zeroize::Zeroizing;
 
 const MAX_IDENTIFIER_CHARS: usize = 64;
@@ -262,7 +261,6 @@ pub(crate) async fn prepare(
 #[tauri::command]
 pub(crate) async fn prepare_mysql_row_update(
     state: tauri::State<'_, crate::AppState>,
-    app: tauri::AppHandle,
     connection_id: String,
     database_name: String,
     table_name: String,
@@ -294,13 +292,19 @@ pub(crate) async fn prepare_mysql_row_update(
         new_value,
     )
     .await?;
-    persist_prepared_plan(storage_pool, &app, plan, preview, "Actualizar fila").await
+    persist_prepared_plan(
+        storage_pool,
+        &state.artifacts_directory,
+        plan,
+        preview,
+        "Actualizar fila",
+    )
+    .await
 }
 
 #[tauri::command]
 pub(crate) async fn prepare_mysql_row_insert(
     state: tauri::State<'_, crate::AppState>,
-    app: tauri::AppHandle,
     connection_id: String,
     database_name: String,
     table_name: String,
@@ -389,12 +393,7 @@ pub(crate) async fn prepare_mysql_row_insert(
             "Incluye todos los valores de la clave primaria para identificar la fila.",
         ));
     }
-    let trigger_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = ? AND EVENT_OBJECT_TABLE = ?").bind(&database_name).bind(&table_name).fetch_one(&active).await.map_err(|_| target_unavailable())?;
-    let fk_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM information_schema.KEY_COLUMN_USAGE WHERE REFERENCED_TABLE_SCHEMA = ? AND REFERENCED_TABLE_NAME = ?")
-        .bind(&database_name).bind(&table_name).fetch_one(&active).await.map_err(|_| target_unavailable())?;
-    if trigger_count != 0 || fk_count != 0 {
-        return Err(AppError::history("ROW_EFFECTS_UNSUPPORTED", "La tabla participa en triggers o claves foráneas; la inserción protegida no puede acotar sus efectos."));
-    }
+    validate_no_row_side_effects(&active, &database_name, &table_name).await?;
     let primary_key: Vec<PrimaryKeyValue> = pk
         .iter()
         .map(|column| PrimaryKeyValue {
@@ -448,12 +447,19 @@ pub(crate) async fn prepare_mysql_row_insert(
         operation: "insert".into(),
         values,
     };
-    persist_prepared_plan(storage_pool, &app, plan, preview, "Insertar fila").await
+    persist_prepared_plan(
+        storage_pool,
+        &state.artifacts_directory,
+        plan,
+        preview,
+        "Insertar fila",
+    )
+    .await
 }
 
 async fn persist_prepared_plan(
     storage_pool: &sqlx::SqlitePool,
-    app: &tauri::AppHandle,
+    artifacts_directory: &std::path::Path,
     plan: MysqlRowUpdatePlan,
     preview: MysqlRowUpdatePreview,
     message: &str,
@@ -498,12 +504,7 @@ async fn persist_prepared_plan(
         )
     })?);
     let plan_hash = hex(&Sha256::digest(&*plaintext));
-    let artifact_directory = app
-        .path()
-        .app_data_dir()
-        .map_err(|_| AppError::storage())?
-        .join("artifacts");
-    let encryption_directory = artifact_directory.clone();
+    let encryption_directory = artifacts_directory.to_path_buf();
     let encrypted_plaintext = Zeroizing::new(plaintext.to_vec());
     let artifact = tauri::async_runtime::spawn_blocking(move || {
         crate::vault::encrypt_artifact_bytes_to_file(
@@ -518,7 +519,7 @@ async fn persist_prepared_plan(
     .map_err(|_| plan_encryption_error())?
     .map_err(|_| plan_encryption_error())?;
     let artifact_path =
-        artifact_directory.join(format!("{}.dbsual-artifact", artifact.artifact_id));
+        artifacts_directory.join(format!("{}.dbsual-artifact", artifact.artifact_id));
     let artifact_path_for_hash = artifact_path.clone();
     let (encrypted_bytes, ciphertext_sha256) =
         tauri::async_runtime::spawn_blocking(move || hash_artifact_file(&artifact_path_for_hash))
@@ -586,7 +587,6 @@ async fn persist_prepared_plan(
 #[tauri::command]
 pub(crate) async fn prepare_mysql_row_revert(
     state: tauri::State<'_, crate::AppState>,
-    app: tauri::AppHandle,
     revision_id: String,
 ) -> Result<PreparedMysqlRowUpdate, AppError> {
     if uuid::Uuid::parse_str(&revision_id).is_err() {
@@ -649,9 +649,8 @@ pub(crate) async fn prepare_mysql_row_revert(
     }
 
     // La función autentica y compara el hash del artefacto antes de devolver su contenido.
-    let source_plaintext = Zeroizing::new(
-        crate::read_history_plan(state.clone(), app.clone(), revision_id.clone()).await?,
-    );
+    let source_plaintext =
+        Zeroizing::new(crate::read_history_plan(state.clone(), revision_id.clone()).await?);
     let source_plan: MysqlRowUpdatePlan =
         serde_json::from_str(&source_plaintext).map_err(|_| {
             AppError::history(
@@ -697,7 +696,7 @@ pub(crate) async fn prepare_mysql_row_revert(
         let (plan, preview) = prepare_insert_revert(&active, &source_plan, &revision_id).await?;
         return persist_prepared_plan(
             storage_pool,
-            &app,
+            &state.artifacts_directory,
             plan,
             preview,
             "Revertir inserción de fila",
@@ -729,7 +728,7 @@ pub(crate) async fn prepare_mysql_row_revert(
     plan.compensates_revision_id = Some(revision_id);
     persist_prepared_plan(
         storage_pool,
-        &app,
+        &state.artifacts_directory,
         plan,
         preview,
         "Revertir edición de fila",
@@ -758,11 +757,7 @@ async fn prepare_insert_revert(
     plan.operation = MysqlRowOperation::Delete;
     plan.compensates_revision_id = Some(source_revision_id.to_owned());
     validate_live_table(&mut *tx, &plan).await?;
-    let trigger_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = ? AND EVENT_OBJECT_TABLE = ?").bind(&plan.database_name).bind(&plan.table_name).fetch_one(&mut *tx).await.map_err(|_| target_unavailable())?;
-    let incoming_fk_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM information_schema.KEY_COLUMN_USAGE WHERE REFERENCED_TABLE_SCHEMA = ? AND REFERENCED_TABLE_NAME = ?").bind(&plan.database_name).bind(&plan.table_name).fetch_one(&mut *tx).await.map_err(|_| target_unavailable())?;
-    if trigger_count != 0 || incoming_fk_count != 0 {
-        return Err(AppError::history("ROW_EFFECTS_UNSUPPORTED", "La tabla tiene triggers o claves foráneas entrantes; no se puede revertir la inserción de forma localizada."));
-    }
+    validate_no_row_side_effects(&mut *tx, &plan.database_name, &plan.table_name).await?;
     let row = fetch_row(
         &mut *tx,
         &plan.database_name,
@@ -825,7 +820,6 @@ async fn prepare_insert_revert(
 #[tauri::command]
 pub(crate) async fn apply_mysql_row_update(
     state: tauri::State<'_, crate::AppState>,
-    app: tauri::AppHandle,
     revision_id: String,
 ) -> Result<(), AppError> {
     if uuid::Uuid::parse_str(&revision_id).is_err() {
@@ -859,6 +853,8 @@ pub(crate) async fn apply_mysql_row_update(
             | "Revertir edición de fila"
             | "Insertar fila"
             | "Revertir inserción de fila"
+            | "Importar CSV"
+            | "Revertir importación CSV"
     ) || status != "confirmed"
         || recovery_state != "verified"
         || engine != "mysql"
@@ -885,11 +881,8 @@ pub(crate) async fn apply_mysql_row_update(
             "La compensación cifrada no coincide con la revisión confirmada.",
         ));
     }
-    let artifact_path = app
-        .path()
-        .app_data_dir()
-        .map_err(|_| AppError::storage())?
-        .join("artifacts")
+    let artifact_path = state
+        .artifacts_directory
         .join(format!("{}.dbsual-artifact", recovery.artifact_id));
     let artifact_path_for_hash = artifact_path.clone();
     let (encrypted_bytes, ciphertext_sha256) =
@@ -904,7 +897,34 @@ pub(crate) async fn apply_mysql_row_update(
             "El artefacto cifrado cambió después de preparar la revisión.",
         ));
     }
-    let encrypted_plan = crate::read_history_plan(state.clone(), app, revision_id.clone()).await?;
+    let encrypted_plan = crate::read_history_plan(state.clone(), revision_id.clone()).await?;
+    if matches!(
+        message.as_str(),
+        "Importar CSV" | "Revertir importación CSV"
+    ) {
+        let active = state
+            .active
+            .0
+            .lock()
+            .await
+            .get(&connection_id)
+            .cloned()
+            .ok_or_else(|| {
+                AppError::history(
+                    "CONNECTION_CLOSED",
+                    "Abre la conexión MySQL antes de aplicar la revisión.",
+                )
+            })?;
+        return crate::mysql_csv_batch::apply_confirmed(
+            &active,
+            storage_pool,
+            &revision_id,
+            &connection_id,
+            encrypted_plan.as_bytes(),
+            &message,
+        )
+        .await;
+    }
     let plan: MysqlRowUpdatePlan = serde_json::from_str(&encrypted_plan).map_err(|_| {
         AppError::history(
             "HISTORY_ARTIFACT_UNAVAILABLE",
@@ -1244,6 +1264,22 @@ pub(crate) async fn apply(
     .await
 }
 
+async fn validate_no_row_side_effects<'a, E>(
+    executor: E,
+    database: &str,
+    table: &str,
+) -> Result<(), AppError>
+where
+    E: sqlx::Executor<'a, Database = sqlx::MySql>,
+{
+    let effects: i64 = sqlx::query_scalar("SELECT (SELECT COUNT(*) FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = ? AND EVENT_OBJECT_TABLE = ?) + (SELECT COUNT(*) FROM information_schema.KEY_COLUMN_USAGE WHERE REFERENCED_TABLE_SCHEMA = ? AND REFERENCED_TABLE_NAME = ?)")
+        .bind(database).bind(table).bind(database).bind(table).fetch_one(executor).await.map_err(|_| target_unavailable())?;
+    if effects != 0 {
+        return Err(AppError::history("ROW_EFFECTS_UNSUPPORTED", "La tabla tiene triggers o claves foráneas entrantes; no se puede garantizar una compensación localizada."));
+    }
+    Ok(())
+}
+
 async fn apply_delete(
     pool: &MySqlPool,
     storage: &sqlx::SqlitePool,
@@ -1252,14 +1288,7 @@ async fn apply_delete(
 ) -> Result<(), AppError> {
     let mut tx = pool.begin().await.map_err(|_| target_unavailable())?;
     validate_live_table(&mut *tx, plan).await?;
-    let triggers: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = ? AND EVENT_OBJECT_TABLE = ?").bind(&plan.database_name).bind(&plan.table_name).fetch_one(&mut *tx).await.map_err(|_| target_unavailable())?;
-    let incoming: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM information_schema.KEY_COLUMN_USAGE WHERE REFERENCED_TABLE_SCHEMA = ? AND REFERENCED_TABLE_NAME = ?").bind(&plan.database_name).bind(&plan.table_name).fetch_one(&mut *tx).await.map_err(|_| target_unavailable())?;
-    if triggers != 0 || incoming != 0 {
-        return Err(AppError::history(
-            "ROW_EFFECTS_UNSUPPORTED",
-            "La tabla tiene triggers o claves foráneas entrantes; la compensación está bloqueada.",
-        ));
-    }
+    validate_no_row_side_effects(&mut *tx, &plan.database_name, &plan.table_name).await?;
     let row = fetch_row(
         &mut *tx,
         &plan.database_name,
@@ -1368,15 +1397,7 @@ async fn apply_insert(
     }
     let mut tx = pool.begin().await.map_err(|_| target_unavailable())?;
     validate_live_table(&mut *tx, plan).await?;
-    let trigger_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = ? AND EVENT_OBJECT_TABLE = ?",
-    ).bind(&plan.database_name).bind(&plan.table_name).fetch_one(&mut *tx).await.map_err(|_| target_unavailable())?;
-    let foreign_key_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM information_schema.KEY_COLUMN_USAGE WHERE (TABLE_SCHEMA = ? AND TABLE_NAME = ? AND REFERENCED_TABLE_NAME IS NOT NULL) OR (REFERENCED_TABLE_SCHEMA = ? AND REFERENCED_TABLE_NAME = ?)",
-    ).bind(&plan.database_name).bind(&plan.table_name).bind(&plan.database_name).bind(&plan.table_name).fetch_one(&mut *tx).await.map_err(|_| target_unavailable())?;
-    if trigger_count != 0 || foreign_key_count != 0 {
-        return Err(AppError::history("ROW_EFFECTS_UNSUPPORTED", "La tabla participa en triggers o claves foráneas; no se puede garantizar una compensación localizada."));
-    }
+    validate_no_row_side_effects(&mut *tx, &plan.database_name, &plan.table_name).await?;
     if fetch_row(
         &mut *tx,
         &plan.database_name,
@@ -1752,13 +1773,13 @@ fn validate_target(
     Ok(())
 }
 
-fn valid_identifier(value: &str) -> bool {
+pub(crate) fn valid_identifier(value: &str) -> bool {
     !value.is_empty()
         && value.chars().count() <= MAX_IDENTIFIER_CHARS
         && !value.chars().any(char::is_control)
 }
 
-fn supported_scalar_type(kind: &str) -> bool {
+pub(crate) fn supported_scalar_type(kind: &str) -> bool {
     matches!(
         kind,
         "char"
@@ -1788,7 +1809,7 @@ fn supported_scalar_type(kind: &str) -> bool {
     )
 }
 
-fn quote_identifier(value: &str) -> String {
+pub(crate) fn quote_identifier(value: &str) -> String {
     format!("`{}`", value.replace('`', "``"))
 }
 fn hex(bytes: &[u8]) -> String {
@@ -1835,6 +1856,14 @@ mod tests {
     impl Drop for TestDirectory {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    struct TestVaultKey(uuid::Uuid);
+
+    impl Drop for TestVaultKey {
+        fn drop(&mut self) {
+            let _ = crate::vault::remove_master_key(self.0);
         }
     }
 
@@ -1890,6 +1919,135 @@ mod tests {
         revision
     }
 
+    async fn create_artifact_revision(
+        storage: &sqlx::SqlitePool,
+        artifact_directory: &std::path::Path,
+        vault: &crate::vault::NewVault,
+        connection_id: &str,
+        database: &str,
+        message: &str,
+        plan: &MysqlRowUpdatePlan,
+    ) -> history::RevisionSummary {
+        let project = history::create_project(
+            storage,
+            connection_id,
+            database,
+            history::DatabaseEngine::Mysql,
+            Some(&plan.server_version),
+        )
+        .await
+        .expect("create history project");
+        let plaintext = serde_json::to_vec(plan).expect("serialize prepared plan");
+        let plan_hash = hex(&Sha256::digest(&plaintext));
+        let artifact = crate::vault::encrypt_artifact_bytes_to_file(
+            artifact_directory,
+            &plaintext,
+            vault.vault_id,
+            &vault.master_key,
+            &vault.recovery_envelope,
+        )
+        .expect("encrypt plan as a real artifact");
+        let artifact_path =
+            artifact_directory.join(format!("{}.dbsual-artifact", artifact.artifact_id));
+        let ciphertext = std::fs::read(&artifact_path).expect("read ciphertext for metadata");
+        let ciphertext_hash = hex(&Sha256::digest(&ciphertext));
+        let revision = history::create_draft(
+            storage,
+            &project.id,
+            message,
+            &plan_hash,
+            artifact.artifact_id,
+            1,
+            history::RecoveryState::Pending,
+        )
+        .await
+        .expect("create row revision");
+        history::record_row_recovery_artifact(
+            storage,
+            &project.id,
+            &revision.id,
+            artifact.artifact_id,
+            &ciphertext_hash,
+            ciphertext.len() as u64,
+        )
+        .await
+        .expect("record captured compensation");
+        history::mark_row_recovery_artifact_verified(
+            storage,
+            &revision.id,
+            artifact.artifact_id,
+            &ciphertext_hash,
+        )
+        .await
+        .expect("verify compensation metadata");
+        history::confirm_draft(storage, &revision.id)
+            .await
+            .expect("confirm revision");
+        revision
+    }
+
+    fn insert_fixture_plan(
+        template: &MysqlRowUpdatePlan,
+        table: &str,
+        id: &str,
+        value: &str,
+    ) -> MysqlRowUpdatePlan {
+        let mut plan = template.clone();
+        plan.table_name = table.to_owned();
+        plan.primary_key = vec![PrimaryKeyValue {
+            column: "id".into(),
+            value: Some(id.to_owned()),
+        }];
+        plan.column_name = "id".into();
+        plan.old_value = None;
+        plan.new_value = None;
+        plan.compensates_revision_id = None;
+        plan.operation = MysqlRowOperation::Insert;
+        plan.values = vec![
+            RowColumnValue {
+                column: "id".into(),
+                value: Some(id.to_owned()),
+            },
+            RowColumnValue {
+                column: "value".into(),
+                value: Some(value.to_owned()),
+            },
+        ];
+        plan.row_sha256 = hex(&Sha256::digest(b"DBSUAL mysql row absent v1\0"));
+        plan.column_names = vec!["id".into(), "value".into()];
+        plan
+    }
+
+    async fn create_authenticated_insert_revision(
+        storage: &sqlx::SqlitePool,
+        artifact_directory: &std::path::Path,
+        vault: &crate::vault::NewVault,
+        connection_id: &str,
+        database: &str,
+        plan: &MysqlRowUpdatePlan,
+    ) -> (history::RevisionSummary, MysqlRowUpdatePlan) {
+        let revision = create_artifact_revision(
+            storage,
+            artifact_directory,
+            vault,
+            connection_id,
+            database,
+            "Insertar fila",
+            plan,
+        )
+        .await;
+        let plaintext = crate::read_history_plan_from(
+            storage,
+            artifact_directory,
+            revision.id.clone(),
+            vault.vault_id,
+        )
+        .await
+        .expect("authenticate inserted-row history artifact");
+        let plan = serde_json::from_str(&plaintext).expect("decode inserted-row artifact");
+        (revision, plan)
+    }
+
     fn example_plan() -> MysqlRowUpdatePlan {
         MysqlRowUpdatePlan {
             version: 1,
@@ -1943,6 +2101,21 @@ mod tests {
         let storage = crate::storage::open_at(directory.0.join("history.sqlite"))
             .await
             .expect("open isolated history");
+        let artifact_directory = directory.0.join("artifacts");
+        let vault = crate::vault::create_vault().expect("create isolated test vault");
+        crate::vault::store_master_key(vault.vault_id, &vault.master_key)
+            .expect("store test key using the Windows keyring");
+        let _vault_key_cleanup = TestVaultKey(vault.vault_id);
+        crate::storage::save(&storage, crate::VAULT_ID_KEY, &vault.vault_id)
+            .await
+            .expect("persist test vault ID");
+        crate::storage::save(
+            &storage,
+            crate::VAULT_ENVELOPE_KEY,
+            &vault.recovery_envelope,
+        )
+        .await
+        .expect("persist test recovery envelope");
 
         let result = AssertUnwindSafe(async {
             sqlx::query(&format!(
@@ -1975,12 +2148,35 @@ mod tests {
             .await
             .expect("prepare without mutation");
             assert_eq!(preview.old_value.as_deref(), Some("before"));
-            let revision =
-                create_verified_revision(&storage, &connection_id, &database, "Actualizar fila")
-                    .await;
-            apply(&pool, &storage, &revision.id, &connection_id, &plan)
-                .await
-                .expect("apply confirmed revision");
+            let revision = create_artifact_revision(
+                &storage,
+                &artifact_directory,
+                &vault,
+                &connection_id,
+                &database,
+                "Actualizar fila",
+                &plan,
+            )
+            .await;
+            let authenticated = crate::read_history_plan_from(
+                &storage,
+                &artifact_directory,
+                revision.id.clone(),
+                vault.vault_id,
+            )
+            .await
+            .expect("authenticate the real encrypted artifact through the command's core reader");
+            let authenticated: MysqlRowUpdatePlan =
+                serde_json::from_str(&authenticated).expect("decode authenticated row plan");
+            apply(
+                &pool,
+                &storage,
+                &revision.id,
+                &connection_id,
+                &authenticated,
+            )
+            .await
+            .expect("apply confirmed revision");
             let applied: (String,) = sqlx::query_as(&format!(
                 "SELECT value FROM {}.items WHERE id=1",
                 quote_identifier(&database)
@@ -2066,9 +2262,9 @@ mod tests {
                 row_sha256: hex(&Sha256::digest(b"DBSUAL mysql row absent v1\0")),
                 column_names: vec!["id".into(), "value".into()],
             };
-            let insert_revision =
-                create_verified_revision(&storage, &connection_id, &database, "Insertar fila")
-                    .await;
+            let insert_revision = create_artifact_revision(&storage, &artifact_directory, &vault, &connection_id, &database, "Insertar fila", &insert_plan).await;
+            let insert_plaintext = crate::read_history_plan_from(&storage, &artifact_directory, insert_revision.id.clone(), vault.vault_id).await.expect("authenticate insert artifact");
+            let insert_plan: MysqlRowUpdatePlan = serde_json::from_str(&insert_plaintext).expect("decode authenticated insert plan");
             let before_insert: Option<(String,)> = sqlx::query_as(&format!(
                 "SELECT value FROM {}.items WHERE id=3",
                 quote_identifier(&database)
@@ -2097,18 +2293,20 @@ mod tests {
             .await
             .expect("read inserted row");
             assert_eq!(inserted.0, "inserted");
+            sqlx::query(&format!("UPDATE {}.items SET value='edited-externally' WHERE id=3", quote_identifier(&database))).execute(&pool).await.expect("change inserted row externally");
+            let conflict = prepare_insert_revert(&pool, &insert_plan, &insert_revision.id).await.expect_err("external edits must block insert compensation");
+            assert_eq!(conflict.code, "ROW_REVERT_CONFLICT");
+            let preserved_after_conflict: (String,) = sqlx::query_as(&format!("SELECT value FROM {}.items WHERE id=3", quote_identifier(&database))).fetch_one(&pool).await.expect("confirm conflict did not delete the row");
+            assert_eq!(preserved_after_conflict.0, "edited-externally");
+            sqlx::query(&format!("UPDATE {}.items SET value='inserted' WHERE id=3", quote_identifier(&database))).execute(&pool).await.expect("restore row for successful compensation");
             let (delete_plan, delete_preview) =
                 prepare_insert_revert(&pool, &insert_plan, &insert_revision.id)
                     .await
                     .expect("prepare compensating delete revision");
             assert_eq!(delete_preview.operation, "delete");
-            let delete_revision = create_verified_revision(
-                &storage,
-                &connection_id,
-                &database,
-                "Revertir inserción de fila",
-            )
-            .await;
+            let delete_revision = create_artifact_revision(&storage, &artifact_directory, &vault, &connection_id, &database, "Revertir inserción de fila", &delete_plan).await;
+            let delete_plaintext = crate::read_history_plan_from(&storage, &artifact_directory, delete_revision.id.clone(), vault.vault_id).await.expect("authenticate delete artifact");
+            let delete_plan: MysqlRowUpdatePlan = serde_json::from_str(&delete_plaintext).expect("decode authenticated delete plan");
             apply(
                 &pool,
                 &storage,
@@ -2126,6 +2324,50 @@ mod tests {
             .await
             .expect("verify compensating deletion");
             assert!(after_delete.is_none());
+
+            // A post-insert external update must stop the compensating delete and preserve that update.
+            let (external_insert_revision, external_insert_plan) = create_authenticated_insert_revision(&storage, &artifact_directory, &vault, &connection_id, &database, &insert_fixture_plan(&insert_plan, "items", "4", "original")).await;
+            apply(&pool, &storage, &external_insert_revision.id, &connection_id, &external_insert_plan).await.expect("insert conflict fixture");
+            sqlx::query(&format!("UPDATE {}.items SET value='external-edit' WHERE id=4", quote_identifier(&database))).execute(&pool).await.expect("edit inserted row outside DBSUAL");
+            let conflict = prepare_insert_revert(&pool, &external_insert_plan, &external_insert_revision.id).await.expect_err("compensation must reject externally changed row");
+            assert_eq!(conflict.code, "ROW_REVERT_CONFLICT");
+            let preserved_external: (String,) = sqlx::query_as(&format!("SELECT value FROM {}.items WHERE id=4", quote_identifier(&database))).fetch_one(&pool).await.expect("read externally changed row");
+            assert_eq!(preserved_external.0, "external-edit", "failed compensation must not delete or overwrite the external change");
+
+            // Triggers make both a new insert and its later localized compensation unsafe.
+            sqlx::query(&format!("CREATE TABLE {}.guard_trigger (id INT PRIMARY KEY, value VARCHAR(100) NOT NULL) ENGINE=InnoDB", quote_identifier(&database))).execute(&pool).await.expect("create trigger fixture");
+            let trigger_source = insert_fixture_plan(&insert_plan, "guard_trigger", "1", "source");
+            let (trigger_source_revision, trigger_source_plan) = create_authenticated_insert_revision(&storage, &artifact_directory, &vault, &connection_id, &database, &trigger_source).await;
+            apply(&pool, &storage, &trigger_source_revision.id, &connection_id, &trigger_source_plan).await.expect("insert trigger compensation source before trigger exists");
+            sqlx::raw_sql(&format!("CREATE TRIGGER {}.guard_trigger_bi BEFORE INSERT ON {}.guard_trigger FOR EACH ROW SET @dbsual_row_test_guard = 1", quote_identifier(&database), quote_identifier(&database))).execute(&pool).await.expect("create real trigger");
+            let trigger_revert = prepare_insert_revert(&pool, &trigger_source_plan, &trigger_source_revision.id).await.expect_err("trigger must block localized compensation");
+            assert_eq!(trigger_revert.code, "ROW_EFFECTS_UNSUPPORTED");
+            let trigger_insert = insert_fixture_plan(&insert_plan, "guard_trigger", "2", "blocked");
+            let (trigger_attempt_revision, trigger_attempt_plan) = create_authenticated_insert_revision(&storage, &artifact_directory, &vault, &connection_id, &database, &trigger_insert).await;
+            let trigger_error = apply(&pool, &storage, &trigger_attempt_revision.id, &connection_id, &trigger_attempt_plan).await.expect_err("trigger must block protected insert");
+            assert_eq!(trigger_error.code, "ROW_EFFECTS_UNSUPPORTED");
+            let trigger_rows: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {}.guard_trigger WHERE id=2", quote_identifier(&database))).fetch_one(&pool).await.expect("check trigger rejection left no row");
+            assert_eq!(trigger_rows, 0);
+            let trigger_source_rows: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {}.guard_trigger WHERE id=1", quote_identifier(&database))).fetch_one(&pool).await.expect("check trigger-blocked compensation retained source row");
+            assert_eq!(trigger_source_rows, 1);
+
+            // An incoming ON DELETE CASCADE FK blocks insertion and compensation for the referenced table.
+            sqlx::query(&format!("CREATE TABLE {}.guard_parent (id INT PRIMARY KEY, value VARCHAR(100) NOT NULL) ENGINE=InnoDB", quote_identifier(&database))).execute(&pool).await.expect("create FK parent fixture");
+            let fk_source = insert_fixture_plan(&insert_plan, "guard_parent", "1", "parent");
+            let (fk_source_revision, fk_source_plan) = create_authenticated_insert_revision(&storage, &artifact_directory, &vault, &connection_id, &database, &fk_source).await;
+            apply(&pool, &storage, &fk_source_revision.id, &connection_id, &fk_source_plan).await.expect("insert FK compensation source before incoming FK exists");
+            sqlx::query(&format!("CREATE TABLE {}.guard_child (id INT PRIMARY KEY, parent_id INT NOT NULL, CONSTRAINT guard_child_parent FOREIGN KEY (parent_id) REFERENCES {}.guard_parent(id) ON DELETE CASCADE) ENGINE=InnoDB", quote_identifier(&database), quote_identifier(&database))).execute(&pool).await.expect("create real incoming cascading foreign key");
+            sqlx::query(&format!("INSERT INTO {}.guard_child VALUES (1, 1)", quote_identifier(&database))).execute(&pool).await.expect("create referencing row");
+            let fk_revert = prepare_insert_revert(&pool, &fk_source_plan, &fk_source_revision.id).await.expect_err("incoming FK must block localized compensation");
+            assert_eq!(fk_revert.code, "ROW_EFFECTS_UNSUPPORTED");
+            let fk_insert = insert_fixture_plan(&insert_plan, "guard_parent", "2", "blocked");
+            let (fk_attempt_revision, fk_attempt_plan) = create_authenticated_insert_revision(&storage, &artifact_directory, &vault, &connection_id, &database, &fk_insert).await;
+            let fk_error = apply(&pool, &storage, &fk_attempt_revision.id, &connection_id, &fk_attempt_plan).await.expect_err("incoming FK must block protected insert");
+            assert_eq!(fk_error.code, "ROW_EFFECTS_UNSUPPORTED");
+            let fk_parent_rows: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {}.guard_parent WHERE id IN (1,2)", quote_identifier(&database))).fetch_one(&pool).await.expect("check FK rejection left source but no attempted row");
+            assert_eq!(fk_parent_rows, 1);
+            let fk_child_rows: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {}.guard_child WHERE parent_id=1", quote_identifier(&database))).fetch_one(&pool).await.expect("check referencing child remains");
+            assert_eq!(fk_child_rows, 1);
 
             let (conflict_plan, _) = prepare(
                 &pool,

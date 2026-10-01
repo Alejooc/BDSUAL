@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react'
+import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from 'react'
 import { isTauri } from '@tauri-apps/api/core'
 import { AlertCircle, ArrowDownUp, ArrowLeft, Check, Database, Filter, LoaderCircle, Pencil, RefreshCw, Search, X } from 'lucide-react'
 import { ipc, type ColumnMetadata, type DatabaseEngine, type IpcError, type MysqlRowUpdatePreview, type SqlReadResult, type TablePageOptions } from './ipc'
@@ -14,6 +14,7 @@ export type TableDataTarget = {
   schema?: string | null
   table: string
   requestId: string
+  isPinned?: boolean
 }
 
 function messageOf(error: unknown) {
@@ -57,9 +58,10 @@ function GridCellValue({ value, column, expandable, expanded, toggle }: { value:
   return <button type="button" className={`table-data-cell-value ${expanded ? 'expanded' : 'clamped'}`} aria-label={`Valor de ${column}${expanded ? ', expandido. Pulse para contraer.' : ', truncado. Pulse para ver completo.'}`} aria-expanded={expanded} title={expanded ? `Contraer ${column}` : `Ver el valor completo de ${column}`} onClick={toggle} onKeyDown={(event) => { if (event.key === 'Escape' && expanded) { event.stopPropagation(); toggle() } }}>{value}</button>
 }
 
-export default function TableDataView({ target, close, active = true }: { target: TableDataTarget; close: () => void; active?: boolean }) {
+export default function TableDataView({ target, close, active = true, refreshRequest }: { target: TableDataTarget; close: () => void; active?: boolean; refreshRequest?: number }) {
   const [result, setResult] = useState<SqlReadResult | null>(null)
   const [error, setError] = useState('')
+  const [clipboardError, setClipboardError] = useState('')
   const [busy, setBusy] = useState(false)
   const [sortColumn, setSortColumn] = useState('')
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('asc')
@@ -84,7 +86,79 @@ export default function TableDataView({ target, close, active = true }: { target
   const [insertNulls, setInsertNulls] = useState<string[]>([])
   const activeQueryId = useRef('')
   const epoch = useRef(0)
+  const tableScrollRef = useRef<HTMLDivElement>(null)
+  const loadMoreSentinelRef = useRef<HTMLDivElement>(null)
+  const loadingMoreRef = useRef(false)
+  const editInputRef = useRef<HTMLInputElement>(null)
+  const editSelection = useRef({ start: 0, end: 0 })
   const optionsRef = useRef<TablePageOptions>({ sortColumn: null, sortDirection: null, filterColumn: null, filterMode: null, filterValue: null })
+
+  const restoreEditorFocus = (selection = editSelection.current) => {
+    requestAnimationFrame(() => {
+      const input = editInputRef.current
+      if (!input || input.disabled) return
+      input.focus()
+      input.setSelectionRange(selection.start, selection.end)
+    })
+  }
+
+  const writeClipboard = async (text: string): Promise<boolean> => {
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable')
+      await navigator.clipboard.writeText(text)
+      setClipboardError('')
+      return true
+    } catch {
+      setClipboardError('No se pudo acceder al portapapeles para copiar el valor.')
+      return false
+    }
+  }
+
+  const cellContextMenu = (event: ReactMouseEvent<HTMLTableCellElement>, value: string | null) => {
+    openContextMenu(event, [
+      { label: 'Copiar', action: () => void writeClipboard(value ?? '') },
+      { label: 'Actualizar filas', separator: true, disabled: busy, action: () => void load(0, false) },
+      { label: 'Cerrar pestaña de datos', action: close },
+    ])
+  }
+
+  const editorContextMenu = (event: ReactMouseEvent<HTMLInputElement>) => {
+    const input = event.currentTarget
+    const start = input.selectionStart ?? 0
+    const end = input.selectionEnd ?? start
+    editSelection.current = { start, end }
+    const selectedText = editValue.slice(start, end)
+    const canEditText = !editAsNull && !updateBusy
+    const replaceSelection = (inserted: string) => {
+      const current = editSelection.current
+      const nextValue = `${editValue.slice(0, current.start)}${inserted}${editValue.slice(current.end)}`
+      const caret = current.start + inserted.length
+      editSelection.current = { start: caret, end: caret }
+      setEditValue(nextValue)
+      restoreEditorFocus()
+    }
+    openContextMenu(event, [
+      { label: 'Copiar', disabled: !selectedText, action: () => { void writeClipboard(selectedText).then(() => restoreEditorFocus()) } },
+      { label: 'Cortar', disabled: !selectedText || !canEditText, action: () => { void writeClipboard(selectedText).then((copied) => { if (copied) replaceSelection('') }) } },
+      { label: 'Pegar', separator: true, disabled: !canEditText, action: () => {
+        void (async () => {
+          try {
+            if (!navigator.clipboard?.readText) throw new Error('clipboard unavailable')
+            const text = await navigator.clipboard.readText()
+            setClipboardError('')
+            replaceSelection(text)
+          } catch {
+            setClipboardError('No se pudo acceder al portapapeles para pegar el valor.')
+            restoreEditorFocus()
+          }
+        })()
+      } },
+      { label: 'Seleccionar todo', action: () => {
+        editSelection.current = { start: 0, end: editValue.length }
+        requestAnimationFrame(() => { editInputRef.current?.focus(); editInputRef.current?.select() })
+      } },
+    ])
+  }
 
   useEffect(() => {
     if (!result) return
@@ -128,6 +202,7 @@ export default function TableDataView({ target, close, active = true }: { target
         ...page,
         rows: [...current.rows, ...page.rows],
         returnedRows: current.returnedRows + page.returnedRows,
+        totalRows: page.totalRows ?? current.totalRows,
         elapsedMs: current.elapsedMs + page.elapsedMs,
       } : page)
     } catch (cause) {
@@ -139,6 +214,24 @@ export default function TableDataView({ target, close, active = true }: { target
       }
     }
   }
+
+  useEffect(() => {
+    const root = tableScrollRef.current
+    const sentinel = loadMoreSentinelRef.current
+    if (!root || !sentinel || !result || result.nextOffset === null) return
+    const observer = new IntersectionObserver((entries) => {
+      if (!entries.some((entry) => entry.isIntersecting) || busy || loadingMoreRef.current || result.nextOffset === null) return
+      loadingMoreRef.current = true
+      void load(result.nextOffset, true).finally(() => { loadingMoreRef.current = false })
+    }, { root, rootMargin: '5000px 0px' })
+    observer.observe(sentinel)
+    return () => observer.disconnect()
+  }, [result?.nextOffset, busy])
+
+  useEffect(() => {
+    if (refreshRequest === undefined) return
+    void load(0, false, optionsRef.current)
+  }, [refreshRequest])
 
   useEffect(() => {
     optionsRef.current = { sortColumn: null, sortDirection: null, filterColumn: null, filterMode: null, filterValue: null }
@@ -286,18 +379,16 @@ export default function TableDataView({ target, close, active = true }: { target
       <div className="table-data-title"><Database size={15} /><span><strong>{target.table}</strong><small>{target.database}{target.schema ? ` · ${target.schema}` : ''} · {target.engine === 'mysql' ? 'Edición protegida disponible para filas identificables' : 'Solo lectura'}</small></span></div>
       <div className="table-data-actions">
         {target.engine === 'mysql' && isTauri() && <button className="secondary-action" onClick={beginInsertRow} disabled={busy || !result || !columnMetadata.some((column) => column.isPrimaryKey)}>Añadir fila</button>}
-        {target.engine === 'mysql' && <CsvImportPreview table={target.table} columns={result?.columns ?? []} disabled={busy || !result} />}
+        {target.engine === 'mysql' && <CsvImportPreview connectionId={target.connectionId} database={target.database} table={target.table} columns={result?.columns ?? []} disabled={busy || !result} onApplied={() => void load(0, false)} />}
         <button className="icon-button subtle" onClick={() => void load(0, false)} disabled={busy} title="Actualizar filas" aria-label="Actualizar filas"><RefreshCw size={14} /></button>
         <button className="icon-button subtle" onClick={close} title="Cerrar tabla" aria-label="Cerrar tabla"><ArrowLeft size={15} /></button>
       </div>
     </header>
-    <div className="table-data-notice">Las filas se cargan desde la base de datos en tramos. Puedes ordenar y filtrar el conjunto completo. Cada cambio MySQL pasa por preparar, revisar, confirmar y aplicar en el historial.</div>
     {target.engine === 'mysql' && !isTauri() && <div className="table-data-notice" role="status">La edición protegida y el historial requieren el núcleo de DBSUAL; en la vista previa solo puedes consultar.</div>}
     {error && <div className="sql-error" role="alert"><AlertCircle size={15} /><span>{error}</span></div>}
     {busy && !result && <div className="table-data-empty"><LoaderCircle size={15} className="spin" /> Cargando datos…</div>}
     {!busy && !error && !result && <div className="table-data-empty">No hay filas para mostrar.</div>}
     {result && <>
-      <div className="table-data-count">{result.returnedRows} filas cargadas{result.hasMore ? ' · hay más filas' : ''}{sortColumn ? ` · orden ${sortColumn} ${sortDirection === 'asc' ? 'ascendente' : 'descendente'}` : ''}{activeFilter ? ` · filtro en ${activeFilter.column}` : ''} · {result.elapsedMs} ms</div>
       {result.columns.length > 0 && <form className="table-data-filter-bar" onSubmit={(event) => {
         event.preventDefault()
         if (!filterColumn) return
@@ -324,7 +415,7 @@ export default function TableDataView({ target, close, active = true }: { target
           void load(0, false, options)
         }}><X size={13} /> Limpiar filtro</button>}
       </form>}
-      <div className="sql-result-table-wrap table-data-grid" aria-busy={busy} onContextMenu={(event) => openContextMenu(event, [{ label: 'Actualizar filas', disabled: busy, action: () => void load(0, false) }, { label: 'Cerrar pestaña de datos', action: close }])}><table className="sql-result-table table-data-result-table"><colgroup>{result.columns.map((column, index) => <col key={columnKey(column, index)} style={{ width: columnWidths[columnKey(column, index)] ?? initialColumnWidth(column) }} />)}</colgroup><thead><tr>{result.columns.map((column, index) => <th key={`${column}-${index}`}><button className="table-data-sort" type="button" onClick={() => {
+      <div className="sql-result-table-wrap table-data-grid" ref={tableScrollRef} aria-busy={busy} onContextMenu={(event) => openContextMenu(event, [{ label: 'Actualizar filas', disabled: busy, action: () => void load(0, false) }, { label: 'Cerrar pestaña de datos', action: close }])}><table className="sql-result-table table-data-result-table"><colgroup>{result.columns.map((column, index) => <col key={columnKey(column, index)} style={{ width: columnWidths[columnKey(column, index)] ?? initialColumnWidth(column) }} />)}</colgroup><thead><tr>{result.columns.map((column, index) => <th key={`${column}-${index}`}><button className="table-data-sort" type="button" onClick={() => {
         const direction = sortColumn === column ? (sortDirection === 'asc' ? 'desc' : 'asc') : 'asc'
         const options: TablePageOptions = { ...optionsRef.current, sortColumn: column, sortDirection: direction }
         optionsRef.current = options
@@ -338,11 +429,12 @@ export default function TableDataView({ target, close, active = true }: { target
         const expanded = expandedCell?.rowIndex === rowIndex && expandedCell.columnIndex === cellIndex
         const cellWidth = columnWidths[columnKey(column, cellIndex)] ?? initialColumnWidth(column)
         const expandable = value !== null && (value.includes('\n') || value.length > Math.max(36, Math.floor((cellWidth - 24) / 7) * 3))
-        return <td key={cellIndex} title={value ?? 'NULL'}>{editing?.rowIndex === rowIndex && editing.columnName === column ? <div className="table-data-cell-edit"><input aria-label={`Nuevo valor para ${column}`} value={editValue} disabled={editAsNull || updateBusy} onChange={(event) => setEditValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') setEditing(null); if (event.key === 'Enter') void prepareRowUpdate() }} /><label><input type="checkbox" checked={editAsNull} disabled={updateBusy} onChange={(event) => setEditAsNull(event.target.checked)} /> NULL</label><button type="button" aria-label={`Revisar cambio de ${column}`} disabled={updateBusy} onClick={() => void prepareRowUpdate()}><Check size={12} /></button><button type="button" aria-label="Cancelar edición" disabled={updateBusy} onClick={() => setEditing(null)}><X size={12} /></button></div> : <><GridCellValue value={value} column={column} expandable={expandable} expanded={expanded} toggle={() => setExpandedCell(expanded ? null : { rowIndex, columnIndex: cellIndex })} />{canEdit && <button type="button" className="table-data-cell-edit-button" aria-label={`Editar ${column}, fila ${rowIndex + 1}`} title={`Editar ${column}`} onClick={() => beginCellEdit(rowIndex, column, value)}><Pencil size={11} /></button>}</>}</td>
-      })}</tr>)}</tbody></table>{busy && <div className="table-data-loading-overlay" role="status"><LoaderCircle size={15} className="spin" /> Cargando datos…</div>}</div>
-      {result.nextOffset !== null && <div className="table-data-footer"><span>Se muestran filas por páginas. Las escrituras concurrentes pueden mover filas entre páginas.</span><button className="sql-load-more" onClick={() => void load(result.nextOffset!, true)} disabled={busy}>{busy ? 'Cargando…' : 'Cargar más filas'}</button></div>}
+        return <td key={cellIndex} title={value ?? 'NULL'} onContextMenu={(event) => cellContextMenu(event, value)}>{editing?.rowIndex === rowIndex && editing.columnName === column ? <div className="table-data-cell-edit"><input ref={editInputRef} aria-label={`Nuevo valor para ${column}`} value={editValue} disabled={editAsNull || updateBusy} onContextMenu={editorContextMenu} onSelect={(event) => { editSelection.current = { start: event.currentTarget.selectionStart ?? 0, end: event.currentTarget.selectionEnd ?? 0 } }} onChange={(event) => { editSelection.current = { start: event.currentTarget.selectionStart ?? event.currentTarget.value.length, end: event.currentTarget.selectionEnd ?? event.currentTarget.value.length }; setEditValue(event.target.value) }} onKeyDown={(event) => { if (event.key === 'Escape') setEditing(null); if (event.key === 'Enter') void prepareRowUpdate() }} /><label><input type="checkbox" checked={editAsNull} disabled={updateBusy} onChange={(event) => setEditAsNull(event.target.checked)} /> NULL</label><button type="button" aria-label={`Revisar cambio de ${column}`} disabled={updateBusy} onClick={() => void prepareRowUpdate()}><Check size={12} /></button><button type="button" aria-label="Cancelar edición" disabled={updateBusy} onClick={() => setEditing(null)}><X size={12} /></button></div> : <><GridCellValue value={value} column={column} expandable={expandable} expanded={expanded} toggle={() => setExpandedCell(expanded ? null : { rowIndex, columnIndex: cellIndex })} />{canEdit && <button type="button" className="table-data-cell-edit-button" aria-label={`Editar ${column}, fila ${rowIndex + 1}`} title={`Editar ${column}`} onClick={() => beginCellEdit(rowIndex, column, value)}><Pencil size={11} /></button>}</>}</td>
+      })}</tr>)}</tbody></table>{result.nextOffset !== null && <div ref={loadMoreSentinelRef} className="table-data-load-sentinel" aria-hidden="true" />}{busy && <div className="table-data-loading-overlay" role="status"><LoaderCircle size={15} className="spin" /> Cargando datos…</div>}</div>
+      <div className="table-data-footer" role="status"><span>{new Intl.NumberFormat('es-CO').format(result.returnedRows)} de {new Intl.NumberFormat('es-CO').format(result.totalRows ?? result.returnedRows)} registro{(result.totalRows ?? result.returnedRows) === 1 ? '' : 's'}{sortColumn ? ` · orden ${sortColumn} ${sortDirection === 'asc' ? 'ascendente' : 'descendente'}` : ''}{activeFilter ? ` · filtro en ${activeFilter.column}` : ''} · {result.elapsedMs} ms</span></div>
     </>}
     {updateError && <div className="sql-error table-data-edit-error" role="alert"><AlertCircle size={15} /><span>{updateError}</span></div>}
+    {clipboardError && <div className="sql-error table-data-edit-error" role="alert"><AlertCircle size={15} /><span>{clipboardError}</span></div>}
     {deferredReview && !rowUpdate && <div className="table-data-applied" role="status"><span>{deferredReview.revision.status === 'confirmed' ? 'La revisión confirmada sigue pendiente; no se descartó ni aplicó.' : 'El borrador sigue guardado en el historial; no se descartó.'}</span><button type="button" className="secondary-action" onClick={() => { setRowUpdate(deferredReview); setReviewConfirmed(deferredReview.revision.status === 'confirmed'); setDeferredReview(null) }}>Reabrir revisión</button></div>}
     {appliedUpdate && !rowUpdate && !deferredReview && <div className="table-data-applied" role="status"><span>{revertPrepared ? 'La revisión compensatoria quedó guardada en el historial. No se modificó la base al prepararla.' : `Revisión ${appliedUpdate.revision.revisionNumber} aplicada. Puedes preparar una revisión compensatoria${appliedUpdate.operation === 'delete' ? ' adicional' : ''}.`}</span>{!revertPrepared && appliedUpdate.operation !== 'delete' && <button type="button" className="secondary-action" disabled={updateBusy} onClick={() => void prepareRowRevert()}>{updateBusy ? 'Preparando…' : 'Preparar reversión'}</button>}</div>}
     {insertDraft && <div className="table-data-review-backdrop"><section className="table-data-review" role="dialog" aria-modal="true" aria-labelledby="row-insert-title"><header><div><h2 id="row-insert-title">Preparar fila nueva</h2><p>{target.database}.{target.table} · aún no se ha modificado la base</p></div><button className="icon-button subtle" aria-label="Cerrar inserción" onClick={() => setInsertDraft(null)}><X size={16} /></button></header><p className="table-data-review-copy">Indica un valor para cada columna, incluida la clave primaria. Marca NULL cuando corresponda. La inserción solo está disponible para tablas InnoDB sin triggers ni claves foráneas entrantes.</p><div className="row-insert-fields">{Object.entries(insertDraft).map(([column, value]) => <label key={column}><span>{column}{columnMetadata.find((entry) => entry.name === column)?.isPrimaryKey ? ' · clave primaria' : ''}</span><input aria-label={`Valor para ${column}`} value={value} disabled={insertNulls.includes(column) || updateBusy} onChange={(event) => setInsertDraft((current) => current ? { ...current, [column]: event.target.value } : current)} /><span className="row-insert-options"><input type="checkbox" aria-label={`Valor NULL para ${column}`} checked={insertNulls.includes(column)} onChange={(event) => setInsertNulls((current) => event.target.checked ? [...current, column] : current.filter((item) => item !== column))} /> NULL</span></label>)}</div>{updateError && <div className="sql-error" role="alert"><AlertCircle size={15} /><span>{updateError}</span></div>}<footer><button className="secondary-action" onClick={() => setInsertDraft(null)}>Cancelar</button><button className="primary-action" disabled={updateBusy} onClick={() => void prepareRowInsert()}>{updateBusy ? 'Preparando…' : 'Revisar fila'}</button></footer></section></div>}

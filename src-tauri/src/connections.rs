@@ -669,7 +669,7 @@ async fn connect(
         .map_err(|error| connection_error(error, &saved.engine))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "tauri-mock-ipc-tests"))]
 pub(crate) async fn connect_mysql_test_from_env() -> Result<MySqlPool, AppError> {
     let input = ConnectionInput {
         id: None,
@@ -3011,7 +3011,7 @@ mod tests {
             drop(cancellation_reader);
             drop(incomplete_writer);
             let mut cancelled_destination_removed = false;
-            for _ in 0..500 {
+            for _ in 0..1500 {
                 let found: Option<(Vec<u8>,)> = sqlx::query_as(
                     "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?",
                 )

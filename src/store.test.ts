@@ -19,6 +19,7 @@ const initialPreferences = {
   bottomHeight: 28,
   bottomCollapsed: false,
   theme: 'dark' as const,
+  customColors: { background: '#111316', sidebar: '#17191d', surface: '#15171b', elevated: '#1d2025', border: '#292c32', text: '#e4e6e9', muted: '#858992', accent: '#7778ec' },
   fontScale: 'default' as const,
   sqlFontSize: 14,
 }
